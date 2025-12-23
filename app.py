@@ -10,12 +10,12 @@ from pyrogram import Client, errors
 from pyrogram.raw import functions, types
 
 # ======================================================
-#      Telegram Auto Reporter v8.3 (Oxeigns)
+#   Telegram Auto Reporter v8.5 (Oxeigns)
 # ======================================================
 BANNER = r"""
 ╔════════════════════════════════════════════════════════════════════════════╗
-║ 🚨 Telegram Auto Reporter v8.3 (Oxeigns)                                  ║
-║ Universal Link Fix | FloodWait Safe | Smart Panel | Target Intelligence   ║
+║ 🚨 Telegram Auto Reporter v8.5 (Oxeigns)                                  ║
+║ Universal Link Fix | FloodWait Safe | Smart Target Resolver | Live Panel  ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 """
 print(BANNER)
@@ -52,7 +52,7 @@ TARGET_INFO = {"name": "Unknown", "members": 0, "type": "Unknown", "link": CHANN
 # LOGGER SYSTEM
 # ======================================================
 async def telegram_logger(session_str: str):
-    """Sets up the live log message and edits it periodically."""
+    """Initializes live status panel in log group."""
     global LIVE_PANEL_MSG_ID
     try:
         async with Client("logger", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
@@ -79,9 +79,7 @@ async def telegram_logger(session_str: str):
                 await app.pin_chat_message(chat_id, msg.id, disable_notification=True)
             except Exception:
                 pass
-
             LOG_SENDER_READY.set()
-
             while True:
                 await asyncio.sleep(30)
     except Exception as e:
@@ -92,7 +90,7 @@ def log_console(msg: str, level="INFO"):
     print(f"{colors.get(level, '')}[{time.strftime('%H:%M:%S')}] {level}: {msg}\033[0m", flush=True)
 
 # ======================================================
-# REPORT REASON
+# REASON
 # ======================================================
 def get_reason():
     mapping = {
@@ -129,44 +127,49 @@ async def validate_session(session_str: str) -> bool:
         return False
 
 # ======================================================
-# TARGET ANALYSIS (ROBUST)
+# TARGET RESOLVER (fixes USERNAME_INVALID)
+# ======================================================
+async def resolve_target_chat(app: Client, link: str):
+    """Resolve Telegram link to valid chat object."""
+    link = link.strip()
+    if link.startswith("https://t.me/"):
+        link = link.replace("https://t.me/", "").replace("@", "").strip()
+
+    chat = None
+    try:
+        if "+" in link:
+            chat = await app.join_chat(f"https://t.me/{link}" if not link.startswith("https://t.me/") else link)
+        else:
+            chat = await app.get_chat(link)
+    except errors.UsernameInvalid:
+        log_console("⚠️ Retrying join_chat() for invalid username.", "WARN")
+        try:
+            chat = await app.join_chat(f"https://t.me/{link}")
+        except Exception as e:
+            log_console(f"⚠️ Second retry failed: {e}", "WARN")
+    except errors.UserAlreadyParticipant:
+        chat = await app.get_chat(link)
+    except errors.FloodWait as e:
+        log_console(f"⏳ FloodWait {e.value}s — waiting...", "WARN")
+        await asyncio.sleep(e.value)
+        chat = await app.get_chat(link)
+    except Exception as e:
+        log_console(f"⚠️ Fallback resolve_peer() for {link}: {e}", "WARN")
+        try:
+            peer = await app.resolve_peer(link)
+            chat = await app.get_chat(peer)
+        except Exception as ex:
+            log_console(f"❌ Could not resolve {link}: {ex}", "ERR")
+    return chat
+
+# ======================================================
+# FETCH TARGET INFO
 # ======================================================
 async def fetch_target_info(session_str: str):
     global TARGET_INFO
     try:
         async with Client("target_info", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            channel = CHANNEL_LINK.strip()
-
-            # Normalize input link
-            if channel.startswith("https://t.me/"):
-                channel = channel.replace("https://t.me/", "").replace("@", "").strip()
-
-            chat = None
-
-            # Try multiple methods safely
-            try:
-                if "+" in CHANNEL_LINK:
-                    chat = await app.join_chat(CHANNEL_LINK)
-                else:
-                    chat = await app.get_chat(channel)
-            except errors.UsernameInvalid:
-                log_console(f"⚠️ Retrying join for public link: {channel}", "WARN")
-                chat = await app.join_chat(CHANNEL_LINK)
-            except errors.UserAlreadyParticipant:
-                chat = await app.get_chat(channel)
-            except errors.FloodWait as e:
-                log_console(f"⏳ FloodWait {e.value}s on info fetch — waiting...", "WARN")
-                await asyncio.sleep(e.value)
-                chat = await app.get_chat(channel)
-            except Exception as e:
-                log_console(f"⚠️ Fallback attempt via resolve_peer: {e}", "WARN")
-                try:
-                    peer = await app.resolve_peer(channel)
-                    chat = await app.get_chat(peer)
-                except Exception as ex:
-                    log_console(f"❌ Final info fetch failed: {ex}", "ERR")
-
-            # Store info
+            chat = await resolve_target_chat(app, CHANNEL_LINK)
             if chat:
                 TARGET_INFO["name"] = getattr(chat, "title", "Unknown")
                 TARGET_INFO["type"] = getattr(chat, "type", "Unknown")
@@ -176,29 +179,33 @@ async def fetch_target_info(session_str: str):
                     TARGET_INFO["members"] = getattr(chat, "members_count", 0)
                 log_console(f"📊 Target Info Loaded: {TARGET_INFO}", "INFO")
             else:
-                log_console(f"⚠️ Unable to resolve target chat for {CHANNEL_LINK}", "WARN")
+                log_console("⚠️ Target chat could not be resolved.", "WARN")
     except Exception as e:
         log_console(f"⚠️ Failed to fetch target info: {e}", "WARN")
 
 # ======================================================
 # REPORT FUNCTION
 # ======================================================
-async def send_report(session_str: str, index: int, channel: str, message_id: int, stats: dict):
+async def send_report(session_str: str, index: int, stats: dict):
     try:
         async with Client(f"reporter_{index}", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            chat = await app.get_chat(channel) if "+" not in channel else await app.join_chat(channel)
-            msg = await app.get_messages(chat.id, message_id)
+            chat = await resolve_target_chat(app, CHANNEL_LINK)
+            if not chat:
+                stats["failed"] += 1
+                return
+            msg_id = int(MESSAGE_LINK.split("/")[-1])
+            msg = await app.get_messages(chat.id, msg_id)
             peer = await app.resolve_peer(chat.id)
-            await asyncio.sleep(random.uniform(0.6, 1.5))
+            await asyncio.sleep(random.uniform(0.8, 1.5))
             await app.invoke(functions.messages.Report(peer=peer, id=[msg.id], reason=REASON, message=REPORT_TEXT))
             stats["success"] += 1
-            log_console(f"✅ Report #{stats['success']} sent successfully (Session {index})", "OK")
+            log_console(f"✅ Report #{stats['success']} sent (Session {index})", "OK")
     except errors.FloodWait as e:
-        log_console(f"⚠️ FloodWait {e.value}s — pausing...", "WARN")
+        log_console(f"⚠️ FloodWait {e.value}s in Session {index}", "WARN")
         await asyncio.sleep(e.value)
     except Exception as e:
         stats["failed"] += 1
-        log_console(f"❌ Error in session {index}: {e}", "ERR")
+        log_console(f"❌ Error in Session {index}: {e}", "ERR")
 
 # ======================================================
 # MAIN
@@ -207,17 +214,12 @@ async def main():
     global LIVE_PANEL_MSG_ID
     stats = {"success": 0, "failed": 0}
 
-    valid_logger = None
-    for s in SESSIONS:
-        if await validate_session(s):
-            valid_logger = s
-            break
+    valid_logger = next((s for s in SESSIONS if await validate_session(s)), None)
     if not valid_logger:
         print("❌ No valid sessions for logger.")
         return
 
     await fetch_target_info(valid_logger)
-
     asyncio.create_task(telegram_logger(valid_logger))
     await LOG_SENDER_READY.wait()
     log_console("🛰️ Log mirror started successfully.", "OK")
@@ -226,9 +228,6 @@ async def main():
     if not valid_sessions:
         log_console("⚠️ No valid sessions remain.", "WARN")
         return
-
-    msg_id = int(MESSAGE_LINK.split("/")[-1])
-    channel = CHANNEL_LINK
 
     async def live_panel_updater():
         async with Client("panel", api_id=API_ID, api_hash=API_HASH, session_string=valid_logger) as app:
@@ -262,17 +261,16 @@ async def main():
     i = 0
     while stats["success"] < NUMBER_OF_REPORTS:
         session = valid_sessions[i % len(valid_sessions)]
-        await send_report(session, i + 1, channel, msg_id, stats)
+        await send_report(session, i + 1, stats)
         i += 1
         await asyncio.sleep(random.uniform(1.0, 2.0))
 
     log_console("✅ All reports completed successfully.", "OK")
-
     while True:
         await asyncio.sleep(60)
 
 # ======================================================
-# CRASH REPORTER
+# CRASH HANDLER
 # ======================================================
 if __name__ == "__main__":
     try:
