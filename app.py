@@ -2,7 +2,6 @@ import os
 import json
 import asyncio
 import random
-import signal
 import sys
 import time
 import traceback
@@ -10,15 +9,14 @@ from typing import List
 from pyrogram import Client, errors
 from pyrogram.raw import functions, types
 
-
 # ======================================================
-#          Telegram Auto Reporter v6.9 (Oxeigns)
+#          Telegram Auto Reporter v7.2 (Oxeigns)
 # ======================================================
 BANNER = r"""
-╔═════════════════════════════════════════════════════════════════════════╗
-║ 🚨 Telegram Auto Reporter v6.9 (Oxeigns)                               ║
-║ Crash-Proof | Smart Group Join | Live Telegram Log System              ║
-╚═════════════════════════════════════════════════════════════════════════╝
+╔════════════════════════════════════════════════════════════════════════════╗
+║ 🚨 Telegram Auto Reporter v7.2 (Oxeigns)                                  ║
+║ Full Log Mirror | Crash Reporter | FloodWait Resistant | Clean Exit       ║
+╚════════════════════════════════════════════════════════════════════════════╝
 """
 print(BANNER)
 
@@ -47,8 +45,52 @@ if not SESSIONS:
     print("❌ No sessions found! Add SESSION_1, SESSION_2, etc. in Heroku Config Vars.")
     sys.exit(1)
 
+# ======================================================
+# GLOBAL LOGGING SYSTEM
+# ======================================================
 
-# ================= UTILITIES ===================
+GLOBAL_LOG_QUEUE = asyncio.Queue()
+
+
+async def telegram_logger(session_str: str):
+    """Continuously sends logs and crash reasons to Telegram log group."""
+    try:
+        async with Client("log_mirror", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
+            try:
+                await app.join_chat(LOG_GROUP_LINK)
+            except errors.UserAlreadyParticipant:
+                pass
+
+            while True:
+                msg = await GLOBAL_LOG_QUEUE.get()
+                try:
+                    await app.send_message(LOG_GROUP_ID, msg)
+                except errors.FloodWait as e:
+                    await asyncio.sleep(e.value)
+                    await app.send_message(LOG_GROUP_ID, msg)
+                except Exception:
+                    pass
+                GLOBAL_LOG_QUEUE.task_done()
+    except Exception as e:
+        print(f"⚠️ Log mirror crashed: {e}")
+
+
+def log(msg: str, level="INFO"):
+    """Print + mirror to Telegram."""
+    colors = {"INFO": "\033[94m", "WARN": "\033[93m", "ERR": "\033[91m", "OK": "\033[92m"}
+    color = colors.get(level, "")
+    reset = "\033[0m"
+    line = f"[{time.strftime('%H:%M:%S')}] {level}: {msg}"
+    print(f"{color}{line}{reset}", flush=True)
+    try:
+        asyncio.get_event_loop().create_task(GLOBAL_LOG_QUEUE.put(f"**[{level}]** {msg}"))
+    except Exception:
+        pass
+
+
+# ======================================================
+# UTILITIES
+# ======================================================
 
 def normalize_channel_link(link: str):
     if link.startswith("https://t.me/"):
@@ -77,49 +119,9 @@ def get_reason():
 REASON = get_reason()
 
 
-def log(msg: str, level: str = "INFO"):
-    colors = {"INFO": "\033[94m", "WARN": "\033[93m", "ERR": "\033[91m", "OK": "\033[92m"}
-    color = colors.get(level, "")
-    reset = "\033[0m"
-    print(f"{color}[{time.strftime('%H:%M:%S')}] {level}: {msg}{reset}", flush=True)
-
-
-async def safe_send_message(session_str, message):
-    """Safely send message to log group (skip if already joined)."""
-    try:
-        async with Client("safe_logger", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            try:
-                await app.join_chat(LOG_GROUP_LINK)
-            except errors.UserAlreadyParticipant:
-                pass
-            await app.send_message(LOG_GROUP_ID, message)
-    except Exception:
-        pass
-
-
-async def send_startup_report(session_str):
-    """Send startup report safely with valid session."""
-    try:
-        async with Client("startup_logger", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            try:
-                await app.join_chat(LOG_GROUP_LINK)
-            except errors.UserAlreadyParticipant:
-                pass
-
-            msg = (
-                f"🚀 **Auto Reporter Started (v6.9)**\n"
-                f"🕒 `{time.strftime('%Y-%m-%d %H:%M:%S')}`\n"
-                f"📡 Channel: {CHANNEL_LINK}\n"
-                f"💬 Message: {MESSAGE_LINK}\n"
-                f"📊 Reports: {NUMBER_OF_REPORTS}\n"
-                f"👥 Sessions Found: {len(SESSIONS)}\n"
-            )
-            await app.send_message(LOG_GROUP_ID, msg)
-    except Exception as e:
-        log(f"Startup report failed: {e}", "WARN")
-
-
-# ================= SESSION VALIDATION ===================
+# ======================================================
+# SESSION VALIDATION
+# ======================================================
 
 async def validate_session(session_str: str) -> bool:
     try:
@@ -134,18 +136,15 @@ async def validate_session(session_str: str) -> bool:
         return False
 
 
-# ================= REPORT ===================
+# ======================================================
+# REPORT FUNCTION
+# ======================================================
 
 async def send_report(session_str: str, index: int, channel: str, message_id: int, stats: dict, error_log: list):
     try:
-        async with Client(f"reporter_{index}", api_id=API_ID, api_hash=API_HASH, session_string=session_str, no_updates=True) as app:
+        async with Client(f"reporter_{index}", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
             me = await app.get_me()
-            try:
-                await app.join_chat(LOG_GROUP_LINK)
-            except errors.UserAlreadyParticipant:
-                pass
-
-            await app.send_message(LOG_GROUP_ID, f"👤 Session {index} active: {me.first_name}")
+            log(f"👤 Session {index} active: {me.first_name}", "INFO")
 
             chat = await app.get_chat(channel)
             msg = await app.get_messages(chat.id, message_id)
@@ -155,96 +154,106 @@ async def send_report(session_str: str, index: int, channel: str, message_id: in
             await app.invoke(functions.messages.Report(peer=peer, id=[msg.id], reason=REASON, message=REPORT_TEXT))
 
             stats["success"] += 1
-            await app.send_message(LOG_GROUP_ID, f"✅ Report sent by {me.first_name} (session {index})")
+            log(f"✅ Report sent by {me.first_name} (session {index})", "OK")
 
+    except errors.FloodWait as e:
+        log(f"⚠️ FloodWait {e.value}s in session {index} — waiting...", "WARN")
+        await asyncio.sleep(e.value)
     except Exception as e:
         stats["failed"] += 1
-        err = f"❌ Error in session {index}: {type(e).__name__} - {e}"
+        err = f"❌ Error session {index}: {type(e).__name__} - {e}"
         error_log.append(err)
         log(err, "ERR")
-        await safe_send_message(session_str, f"**[ERROR]** {err}")
 
 
-# ================= MAIN ===================
+# ======================================================
+# MAIN
+# ======================================================
 
 async def main():
     stats = {"success": 0, "failed": 0}
     error_log = []
 
-    # Use the first valid session for logs
-    log("🔍 Checking sessions validity...", "INFO")
+    # Start Telegram logger with first valid session
+    valid_logger = None
+    for s in SESSIONS:
+        if await validate_session(s):
+            valid_logger = s
+            break
+    if not valid_logger:
+        log("❌ No valid session for Telegram logger.", "ERR")
+        return
+
+    asyncio.create_task(telegram_logger(valid_logger))
+    await asyncio.sleep(2)
+    log("🛰️ Log mirror started successfully.", "OK")
+    log("🚀 Starting Auto Reporter v7.2", "INFO")
+
     valid_sessions = []
     for s in SESSIONS:
         if await validate_session(s):
             valid_sessions.append(s)
-        await asyncio.sleep(1)
+        await asyncio.sleep(0.5)
 
     if not valid_sessions:
-        log("❌ No valid sessions found — exiting.", "ERR")
+        log("❌ No valid sessions found. Exiting.", "ERR")
         return
-
-    await send_startup_report(valid_sessions[0])
 
     msg_id = int(MESSAGE_LINK.split("/")[-1])
     channel = normalize_channel_link(CHANNEL_LINK)
     total_reports = min(NUMBER_OF_REPORTS, len(valid_sessions))
-    log(f"🚀 Starting with {total_reports}/{len(valid_sessions)} valid sessions...\n", "INFO")
 
+    log(f"📡 Channel: {CHANNEL_LINK}", "INFO")
+    log(f"💬 Message: {MESSAGE_LINK}", "INFO")
+    log(f"👥 Sessions: {len(valid_sessions)} | Target: {total_reports} reports", "INFO")
+
+    # Start reporting tasks
     tasks = [
         asyncio.create_task(send_report(session, i + 1, channel, msg_id, stats, error_log))
         for i, session in enumerate(valid_sessions[:total_reports])
     ]
 
-    async def live_progress():
-        try:
-            async with Client("progress_logger", api_id=API_ID, api_hash=API_HASH, session_string=valid_sessions[0]) as progress_app:
-                try:
-                    await progress_app.join_chat(LOG_GROUP_LINK)
-                except errors.UserAlreadyParticipant:
-                    pass
+    async def live_logs():
+        while any(not t.done() for t in tasks):
+            msg = (
+                f"📊 **Live Status Update**\n"
+                f"✅ Success: {stats['success']}\n"
+                f"❌ Failed: {stats['failed']}\n"
+                f"⚙️ Pending: {len(tasks) - (stats['success'] + stats['failed'])}\n"
+            )
+            if error_log:
+                msg += "\n🚨 Errors:\n" + "\n".join(error_log[-3:])
+            log(msg, "INFO")
+            await asyncio.sleep(10)
 
-                while any(not t.done() for t in tasks):
-                    msg = (
-                        f"📡 **Live Report Update**\n"
-                        f"✅ Success: {stats['success']}\n"
-                        f"❌ Failed: {stats['failed']}\n"
-                        f"⚙️ Pending: {len(tasks) - (stats['success'] + stats['failed'])}\n"
-                    )
-                    if error_log:
-                        msg += "\n🚨 Recent Errors:\n" + "\n".join(error_log[-3:])
-                    await progress_app.send_message(LOG_GROUP_ID, msg)
-                    await asyncio.sleep(10)
-        except Exception as e:
-            log(f"Live logger crashed: {e}", "WARN")
-
-    asyncio.create_task(live_progress())
+    asyncio.create_task(live_logs())
     await asyncio.gather(*tasks, return_exceptions=True)
 
-    try:
-        async with Client("logger_final", api_id=API_ID, api_hash=API_HASH, session_string=valid_sessions[0]) as app:
-            try:
-                await app.join_chat(LOG_GROUP_LINK)
-            except errors.UserAlreadyParticipant:
-                pass
-            await app.send_message(
-                LOG_GROUP_ID,
-                f"📊 **Final Summary**\n✅ Successful: {stats['success']}\n❌ Failed: {stats['failed']}\n📈 Total: {total_reports}"
-            )
-    except Exception as e:
-        log(f"⚠️ Final summary failed: {e}", "WARN")
-
-    log("🏁 Reporting completed. Clean exit.\n", "OK")
-    await asyncio.sleep(2)
+    summary = (
+        f"📊 **Final Summary**\n"
+        f"✅ Successful: {stats['success']}\n"
+        f"❌ Failed: {stats['failed']}\n"
+        f"📈 Total: {total_reports}\n"
+        f"🕒 `{time.strftime('%Y-%m-%d %H:%M:%S')}`"
+    )
+    log(summary, "OK")
+    log("🏁 Reporting completed — safe exit after 10 seconds...", "INFO")
+    await asyncio.sleep(10)
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except Exception as e:
-        log(f"💥 CRASH: {e}", "ERR")
+        # Log crash with traceback both locally and to Telegram
+        crash_trace = traceback.format_exc()
+        crash_msg = f"💥 **Crash Detected!**\nType: `{type(e).__name__}`\nReason: `{e}`\n\n```{crash_trace}```"
+        print(crash_msg)
         try:
-            session_str = SESSIONS[0]
-            crash_text = f"💥 **Critical Crash Detected**\n`{type(e).__name__}`: {e}\n\n```{traceback.format_exc()}```"
-            asyncio.run(safe_send_message(session_str, crash_text))
-        except Exception:
-            pass
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        if SESSIONS:
+            loop.run_until_complete(GLOBAL_LOG_QUEUE.put(crash_msg))
+            loop.run_until_complete(telegram_logger(SESSIONS[0]))
