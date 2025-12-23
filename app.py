@@ -10,12 +10,12 @@ from pyrogram import Client, errors
 from pyrogram.raw import functions, types
 
 # ======================================================
-#   Telegram Auto Reporter v8.6 (Oxeigns)
+#   Telegram Auto Reporter v8.7 (Oxeigns)
 # ======================================================
 BANNER = r"""
 ╔════════════════════════════════════════════════════════════════════════════╗
-║ 🚨 Telegram Auto Reporter v8.6 (Oxeigns)                                  ║
-║ Async-Safe | Smart Resolver | FloodWait Resistant | Live Log Panel        ║
+║ 🚨 Telegram Auto Reporter v8.7 (Oxeigns)                                  ║
+║ Live Counter | Smart Resolver | FloodWait Safe | Clean Log Panel          ║
 ╚════════════════════════════════════════════════════════════════════════════╝
 """
 print(BANNER)
@@ -52,7 +52,7 @@ TARGET_INFO = {"name": "Unknown", "members": 0, "type": "Unknown", "link": CHANN
 # LOGGER SYSTEM
 # ======================================================
 async def telegram_logger(session_str: str):
-    """Initializes live status panel in log group."""
+    """Initialize live status panel in log group."""
     global LIVE_PANEL_MSG_ID
     try:
         async with Client("logger", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
@@ -65,11 +65,10 @@ async def telegram_logger(session_str: str):
             chat_id = getattr(chat, "id", LOG_GROUP_ID)
             msg = await app.send_message(
                 chat_id,
-                f"🛰️ **Live Panel Initializing...**\n\n🎯 Target: {CHANNEL_LINK}\n💬 Message: {MESSAGE_LINK}\n"
+                f"🛰️ **Initializing Live Report Panel...**\n\n🎯 Target: {CHANNEL_LINK}\n💬 Message: {MESSAGE_LINK}"
             )
             LIVE_PANEL_MSG_ID = msg.id
             LOG_SENDER_READY.set()
-
             while True:
                 await asyncio.sleep(30)
     except Exception as e:
@@ -165,7 +164,7 @@ async def send_report(session_str: str, index: int, stats: dict):
             msg_id = int(MESSAGE_LINK.split("/")[-1])
             msg = await app.get_messages(chat.id, msg_id)
             peer = await app.resolve_peer(chat.id)
-            await asyncio.sleep(random.uniform(1.0, 1.5))
+            await asyncio.sleep(random.uniform(0.8, 1.5))
             await app.invoke(functions.messages.Report(peer=peer, id=[msg.id], reason=REASON, message=REPORT_TEXT))
             stats["success"] += 1
             log_console(f"✅ Report #{stats['success']} sent (Session {index})", "OK")
@@ -181,9 +180,9 @@ async def send_report(session_str: str, index: int, stats: dict):
 # ======================================================
 async def main():
     global LIVE_PANEL_MSG_ID
-    stats = {"success": 0, "failed": 0}
+    stats = {"success": 0, "failed": 0, "sent": 0}
 
-    # ✅ FIX: Async-safe valid_logger selector
+    # Select first valid logger session
     valid_logger = None
     for s in SESSIONS:
         if await validate_session(s):
@@ -197,20 +196,44 @@ async def main():
     await LOG_SENDER_READY.wait()
     log_console("🛰️ Log mirror started successfully.", "OK")
 
-    valid_sessions = []
-    for s in SESSIONS:
-        if await validate_session(s):
-            valid_sessions.append(s)
-
+    valid_sessions = [s for s in SESSIONS if await validate_session(s)]
     if not valid_sessions:
         log_console("⚠️ No valid sessions remain.", "WARN")
         return
 
-    # Loop reports
+    # Live panel updater
+    async def live_panel():
+        async with Client("panel", api_id=API_ID, api_hash=API_HASH, session_string=valid_logger) as app:
+            chat = await app.get_chat(LOG_GROUP_LINK)
+            chat_id = getattr(chat, "id", LOG_GROUP_ID)
+            while True:
+                try:
+                    progress = round((stats["sent"] / max(1, NUMBER_OF_REPORTS)) * 100, 1)
+                    text = (
+                        f"📊 **Live Reporting Panel**\n\n"
+                        f"🎯 **Target:** {CHANNEL_LINK}\n"
+                        f"💬 **Message:** {MESSAGE_LINK}\n\n"
+                        f"✅ Success: {stats['success']}\n"
+                        f"❌ Failed: {stats['failed']}\n"
+                        f"📨 Sent: {stats['sent']} / {NUMBER_OF_REPORTS}\n"
+                        f"⚙️ Progress: {progress}%\n\n"
+                        f"🧾 Reason: {REPORT_TEXT}\n"
+                        f"⏰ Updated: `{time.strftime('%H:%M:%S')}`"
+                    )
+                    await app.edit_message_text(chat_id, LIVE_PANEL_MSG_ID, text)
+                except errors.FloodWait as e:
+                    await asyncio.sleep(e.value)
+                except Exception:
+                    pass
+                await asyncio.sleep(10)
+
+    asyncio.create_task(live_panel())
+
     i = 0
-    while stats["success"] < NUMBER_OF_REPORTS:
+    while stats["sent"] < NUMBER_OF_REPORTS:
         session = valid_sessions[i % len(valid_sessions)]
         await send_report(session, i + 1, stats)
+        stats["sent"] += 1
         i += 1
         await asyncio.sleep(random.uniform(1.0, 2.0))
 
