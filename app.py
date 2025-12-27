@@ -281,7 +281,7 @@ def format_help() -> str:
         "**Commands**\n"
         "/start - show help and current status\n"
         "/help - show command list\n"
-        "/set_target <group_link> - set target group/channel link, then send the message link when prompted\n"
+        "/set_target [group_link] - set target group/channel link; if omitted, I'll ask for it next\n"
         "/send_link <group_link> - quick flow asking for message link; report count defaults to available sessions\n"
         "/session_limit <n> - limit number of sessions used (0 = all)\n"
         "/add_session [name] - prompt to send and store a user session string\n"
@@ -364,6 +364,16 @@ def is_valid_group_link(link: str) -> bool:
         rf"^https://t\.me/joinchat/{INVITE_TOKEN_RE}$",
     ]
     return any(re.fullmatch(p, normalized) for p in patterns)
+
+
+def format_reply_card(title: str, lines: List[str]) -> str:
+    width = max(len(title) + 2, max((len(line) for line in lines), default=0) + 2, 28)
+    top = "┌" + "─" * width + "┐"
+    title_line = f"│ {title}".ljust(width + 1, " ") + "│"
+    separator = "├" + "─" * width + "┤"
+    body_lines = [f"│ {line}".ljust(width + 1, " ") + "│" for line in lines]
+    bottom = "└" + "─" * width + "┘"
+    return "\n".join([top, title_line, separator, *body_lines, bottom])
 
 
 def parse_message_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
@@ -1063,21 +1073,49 @@ async def main():
     async def _set_target(_, msg):
         if unauthorized(msg):
             return
+        state = get_state(msg.from_user.id)
         parts = (msg.text or "").split(maxsplit=1)
         if len(parts) != 2:
-            await safe_reply_text(msg, "Usage: /set_target <group_link>")
+            state.mode = "awaiting_group_link"
+            state.quick_start = False
+            await safe_reply_text(
+                msg,
+                format_reply_card(
+                    "🎯 Target setup",
+                    [
+                        "📎 Send the group/channel invite or @username link.",
+                        "✅ Formats: https://t.me/username, https://t.me/+invite, @name.",
+                        "➡️ I'll then ask for the exact message link to report.",
+                    ],
+                ),
+            )
             return
+
         link = parts[1].strip()
         if not is_valid_group_link(link):
-            await safe_reply_text(msg, "Invalid group/channel link. Provide a valid https://t.me link.")
+            await safe_reply_text(
+                msg,
+                format_reply_card(
+                    "🚫 Invalid group link",
+                    [
+                        "Send a valid https://t.me invite or @username.",
+                        "Examples: https://t.me/example, https://t.me/+invite-code",
+                    ],
+                ),
+            )
             return
-        state = get_state(msg.from_user.id)
         state.target.group_link = normalize_group_link(link)
         state.mode = "awaiting_message_link"
         state.quick_start = False
         await safe_reply_text(
             msg,
-            "Group link saved. Send the target message link (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
+            format_reply_card(
+                "📌 Group saved",
+                [
+                    f"Link: {state.target.group_link}",
+                    "🔗 Now send the target message link (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
+                ],
+            ),
         )
 
     @app.on_message(command_filter("send_link"))
@@ -1203,18 +1241,76 @@ async def main():
             return
         state = get_state(msg.from_user.id)
 
+        if state.mode == "awaiting_group_link":
+            group_link = (msg.text or "").strip()
+            if not is_valid_group_link(group_link):
+                await safe_reply_text(
+                    msg,
+                    format_reply_card(
+                        "🚫 Invalid group link",
+                        [
+                            "Please send a valid https://t.me invite or @username link.",
+                            "Examples: https://t.me/example, https://t.me/+invite-code",
+                        ],
+                    ),
+                )
+                return
+
+            state.target.group_link = normalize_group_link(group_link)
+            state.mode = "awaiting_message_link"
+            state.quick_start = False
+            await safe_reply_text(
+                msg,
+                format_reply_card(
+                    "📌 Group saved",
+                    [
+                        f"Link: {state.target.group_link}",
+                        "🔗 Now send the target message link (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
+                        "ℹ️ Your next message will be saved as the message link.",
+                    ],
+                ),
+            )
+            return
+
         if state.mode == "awaiting_message_link":
             message_link = (msg.text or "").strip()
             chat_identifier, msg_id = parse_link(message_link)
             if chat_identifier is None or msg_id is None:
-                await safe_reply_text(msg, "Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>.")
+                await safe_reply_text(
+                    msg,
+                    format_reply_card(
+                        "🚫 Invalid message link",
+                        [
+                            "Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>.",
+                            "Tip: Open the post, copy its link, and paste it here.",
+                        ],
+                    ),
+                )
                 return
             await handle_set_links(msg, state, state.target.group_link or "", message_link)
+            await safe_reply_text(
+                msg,
+                format_reply_card(
+                    "✅ Target updated",
+                    [
+                        f"Group: {state.target.group_link}",
+                        f"Message: {state.target.message_link}",
+                        "🎯 Ready to configure report type and details.",
+                    ],
+                ),
+            )
             if state.quick_start:
                 state.mode = "awaiting_report_type"
                 await safe_reply_text(
                     msg,
-                    "Send the report type key (" + ", ".join(REASON_MAP.keys()) + "). Report count defaults to your available sessions.",
+                    format_reply_card(
+                        "📝 Choose report type",
+                        [
+                            "Send one of: " + ", ".join(REASON_MAP.keys()),
+                            "Report count defaults to available sessions.",
+                            "Use /cancel to stop the quick flow.",
+                        ],
+                    ),
                 )
             return
 
