@@ -451,6 +451,26 @@ async def resolve_log_group_id(client: Client) -> Optional[int]:
     return chat.id
 
 
+async def ensure_log_group_membership(client: Client) -> Tuple[bool, str]:
+    if not LOG_GROUP_LINK:
+        return True, "Log group link not configured; skipping join"
+    try:
+        chat = await client.join_chat(LOG_GROUP_LINK)
+        return True, f"Joined log group {chat.id}"
+    except UserAlreadyParticipant:
+        try:
+            chat = await client.get_chat(LOG_GROUP_LINK)
+            STATE_DATA["log_group_id"] = chat.id
+            save_state(STATE_DATA)
+            return True, "Already in log group"
+        except RPCError as e:
+            return False, f"Failed to confirm log group membership: {getattr(e, 'MESSAGE', None) or e}"
+    except (InviteHashExpired, InviteHashInvalid):
+        return False, "Log group invite link expired or invalid"
+    except RPCError as e:
+        return False, f"Log group join failed: {getattr(e, 'MESSAGE', None) or e}"
+
+
 async def send_log_message(
     client: Client,
     chat_id: Optional[int],
@@ -548,6 +568,9 @@ async def evaluate_session(
             no_updates=True,
         ) as user_client:
             me = await user_client.get_me()
+            ok, detail = await ensure_log_group_membership(user_client)
+            if not ok:
+                return "invalid", f"Log group join failed: {detail}"
             try:
                 peer, join_detail = await join_target_chat(user_client, join_link, target)
                 if not peer:
@@ -596,6 +619,9 @@ async def validate_session_access(
             session_string=session_str,
             no_updates=True,
         ) as user_client:
+            ok, detail = await ensure_log_group_membership(user_client)
+            if not ok:
+                return "invalid", f"Log group join failed: {detail}", None, None
             peer, join_detail = await join_target_chat(user_client, join_link, target)
             if not peer:
                 return "invalid", f"Join failed: {join_detail}", None, None

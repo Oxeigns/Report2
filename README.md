@@ -7,7 +7,8 @@ A **button-driven Telegram reporting system** built on Pyrogram. Validate target
 Only three values are required when you deploy:
 
 1. `PRIMARY_SESSION` — exactly one bootstrap Telegram client session string.
-2. `LOG_GROUP_LINK` — the group/channel invite or username link where panels and logs will be posted.
+2. `LOG_GROUP_LINK` — the group/channel invite or username link where panels and logs will be posted. Every session
+   (including additional user sessions) will automatically join this log group via the invite link before use.
 3. `OWNER_ID` — Telegram user ID of the owner who can change any setting after deployment.
 
 API credentials (`API_ID` and `API_HASH`) can be provided via environment variables or `config.json`. Everything else is configured later from the log group.
