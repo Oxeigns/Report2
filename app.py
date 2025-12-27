@@ -750,6 +750,10 @@ def is_sudo(user_id: Optional[int]) -> bool:
 
 
 def resolve_effective_user_id(message) -> Optional[int]:
+    if getattr(message, "chat", None) and getattr(message.chat, "id", None) == STATE_DATA.get(
+        "log_group_id"
+    ):
+        return OWNER_ID
     if getattr(message, "from_user", None):
         return message.from_user.id
     if getattr(message, "outgoing", False) and OWNER_ID:
@@ -762,6 +766,12 @@ def resolve_effective_user_id(message) -> Optional[int]:
     if getattr(message, "sender_chat", None) and getattr(message, "outgoing", False) and OWNER_ID:
         return OWNER_ID
     return None
+
+
+def is_log_group_message(message) -> bool:
+    return getattr(message, "chat", None) and getattr(message.chat, "id", None) == STATE_DATA.get(
+        "log_group_id"
+    )
 
 
 def has_power(user_id: Optional[int]) -> bool:
@@ -935,9 +945,11 @@ async def main():
         return filters.command(name) & command_scope
 
     def unauthorized(msg) -> bool:
+        if not is_log_group_message(msg):
+            return True
+
         user_id = resolve_effective_user_id(msg)
         if not has_power(user_id):
-            asyncio.create_task(safe_reply_text(msg, "Unauthorized."))
             return True
         return False
 
@@ -1175,6 +1187,7 @@ async def main():
             return
 
     await app.start()
+    await resolve_log_group_id(app)
     print("Moderator tool is running...")
     await asyncio.Event().wait()
 
