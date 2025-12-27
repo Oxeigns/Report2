@@ -294,18 +294,77 @@ def format_status(state: ConversationState) -> str:
     )
 
 
-def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
-    link = link.strip()
-    pattern_username = r"^https?://t\.me/([A-Za-z0-9_]+)/([0-9]+)$"
-    pattern_c = r"^https?://t\.me/c/([0-9]+)/([0-9]+)$"
+USERNAME_RE = r"[A-Za-z0-9_]{3,}"
+INVITE_TOKEN_RE = r"[A-Za-z0-9_-]{5,}"  # Telegram invite hashes are at least 5 chars
 
-    m_username = re.match(pattern_username, link)
+
+def normalize_group_link(link: str) -> str:
+    """Normalize a group/channel join link to a canonical https://t.me form.
+
+    Handles the following cases:
+    - @username => https://t.me/username
+    - username  => https://t.me/username
+    - telegram.me/t.me with or without http/https
+    - tg://join?invite=HASH => https://t.me/+HASH
+    - joinchat invites => https://t.me/joinchat/HASH
+    """
+
+    normalized = link.strip()
+
+    if normalized.startswith("tg://join?invite="):
+        normalized = normalized.replace("tg://join?invite=", "https://t.me/+", 1)
+
+    if normalized.startswith("telegram.me/"):
+        normalized = normalized.replace("telegram.me/", "t.me/", 1)
+    if normalized.startswith("http://telegram.me/"):
+        normalized = normalized.replace("http://telegram.me/", "https://t.me/", 1)
+    if normalized.startswith("http://t.me/"):
+        normalized = normalized.replace("http://t.me/", "https://t.me/", 1)
+
+    if normalized.startswith("@"):  # plain @username
+        normalized = normalized[1:]
+    if re.fullmatch(USERNAME_RE, normalized):
+        normalized = f"https://t.me/{normalized}"
+
+    if normalized.startswith("t.me/"):
+        normalized = f"https://{normalized}"
+
+    return normalized
+
+
+def is_valid_group_link(link: str) -> bool:
+    normalized = normalize_group_link(link)
+    patterns = [
+        rf"^https://t\.me/{USERNAME_RE}$",
+        rf"^https://t\.me/\+{INVITE_TOKEN_RE}$",
+        rf"^https://t\.me/joinchat/{INVITE_TOKEN_RE}$",
+    ]
+    return any(re.fullmatch(p, normalized) for p in patterns)
+
+
+def parse_message_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
+    """Parse public and /c/ message links and return (chat_identifier, message_id).
+
+    Chat identifier is a username for public channels/groups, or the numeric peer ID
+    for /c/ links (prefixed with -100).
+    """
+
+    normalized = link.strip()
+    normalized = normalized.replace("telegram.me/", "t.me/")
+    normalized = normalized.replace("http://t.me/", "https://t.me/")
+    if normalized.startswith("t.me/"):
+        normalized = f"https://{normalized}"
+
+    pattern_username = rf"^https://t\.me/({USERNAME_RE})/(\d+)$"
+    pattern_c = r"^https://t\.me/c/(\d+)/(\d+)$"
+
+    m_username = re.match(pattern_username, normalized)
     if m_username:
         chat = m_username.group(1)
         msg_id = int(m_username.group(2))
         return chat, msg_id
 
-    m_c = re.match(pattern_c, link)
+    m_c = re.match(pattern_c, normalized)
     if m_c:
         internal_id = m_c.group(1)
         msg_id = int(m_c.group(2))
@@ -315,33 +374,52 @@ def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     return None, None
 
 
-def normalize_group_link(link: str) -> str:
-    normalized = link.strip()
-
-    if normalized.startswith("tg://join?invite="):
-        normalized = normalized.replace("tg://join?invite=", "https://t.me/+", 1)
-
-    if normalized.startswith("@"):  # plain @username
-        normalized = normalized[1:]
-    if re.match(r"^[A-Za-z0-9_]{3,}$", normalized):
-        normalized = f"https://t.me/{normalized}"
-
-    if normalized.startswith("t.me/"):
-        normalized = f"https://{normalized}"
-    if normalized.startswith("telegram.me/"):
-        normalized = normalized.replace("telegram.me/", "t.me/", 1)
-
-    return normalized
+def is_valid_message_link(link: str) -> bool:
+    chat_identifier, message_id = parse_message_link(link)
+    return chat_identifier is not None and message_id is not None
 
 
-def is_valid_group_link(link: str) -> bool:
-    normalized = normalize_group_link(link)
-    patterns = [
-        r"^https?://t\.me/[A-Za-z0-9_]{3,}$",
-        r"^https?://t\.me/\+[A-Za-z0-9_-]+$",
-        r"^https?://t\.me/joinchat/[A-Za-z0-9_-]+$",
-    ]
-    return any(re.match(p, normalized) for p in patterns)
+def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
+    return parse_message_link(link)
+
+
+# --- Lightweight unit-test style examples for developers and admins ---
+LINK_VALIDATION_EXAMPLES = {
+    "normalize_group_link": [
+        ("@SomePublicChannel", "https://t.me/SomePublicChannel"),
+        ("SomePublicChannel", "https://t.me/SomePublicChannel"),
+        ("https://telegram.me/SomePublicChannel", "https://t.me/SomePublicChannel"),
+        ("tg://join?invite=XXXX", "https://t.me/+XXXX"),
+        ("https://t.me/joinchat/XXXX", "https://t.me/joinchat/XXXX"),
+    ],
+    "is_valid_group_link": [
+        ("@good_name", True),
+        ("https://t.me/+InviteHash", True),
+        ("https://t.me/joinchat/InviteHash", True),
+        ("https://t.me/aa", False),
+        ("https://example.com/notme", False),
+    ],
+    "parse_message_link": [
+        ("https://t.me/SomePublicChannel/123", ("SomePublicChannel", 123)),
+        ("t.me/c/123456789/456", (-100123456789, 456)),
+        ("https://telegram.me/Group/42", ("Group", 42)),
+    ],
+    "is_valid_message_link": [
+        ("https://t.me/SomePublicChannel/123", True),
+        ("https://t.me/c/123456789/456", True),
+        ("https://t.me/c/notanumber/456", False),
+        ("https://t.me/SomePublicChannel/notanumber", False),
+    ],
+}
+
+
+LINK_ERROR_NOTES = (
+    "Common causes of 'Invalid or unknown public group/channel link':\n"
+    "• Typo or renamed username: normalize with normalize_group_link() and verify via is_valid_group_link().\n"
+    "• Private or expired invite: public-style links become unreachable; use canonical https://t.me/+HASH or joinchat/HASH and check tokens with is_valid_group_link().\n"
+    "• Deleted or restricted chat: validation passes regex but resolve fails (RPCError/UsernameNotOccupied/InviteHashInvalid).\n"
+    "• Missing scheme or wrong domain: normalize_group_link() upgrades to https://t.me/<username>; reject anything that still fails is_valid_group_link()."
+)
 
 
 async def resolve_user_identifier(app: Client, message) -> Tuple[Optional[int], str]:
