@@ -21,8 +21,16 @@ def load_config() -> Dict:
         raise FileNotFoundError("Missing config.json")
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
+
     if "OWNER_ID" not in config:
         config["OWNER_ID"] = None
+
+    config.setdefault("REPORT_REASON", None)
+    config.setdefault("REPORT_TEXT", "")
+    config.setdefault("TOTAL_REPORTS", None)
+    config.setdefault("LOG_GROUP_LINK", "")
+    config.setdefault("GROUP_MESSAGE_LINK", "")
+
     return config
 
 
@@ -61,6 +69,8 @@ API_ID = int(os.getenv("API_ID", CONFIG.get("API_ID", 0)))
 API_HASH = os.getenv("API_HASH", CONFIG.get("API_HASH", ""))
 LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", CONFIG.get("LOG_GROUP_ID", 0) or 0))
 OWNER_ID = CONFIG.get("OWNER_ID")
+LOG_GROUP_LINK = CONFIG.get("LOG_GROUP_LINK", "")
+GROUP_MESSAGE_LINK = CONFIG.get("GROUP_MESSAGE_LINK", "")
 
 if not API_ID or not API_HASH:
     raise RuntimeError("API_ID and API_HASH must be configured")
@@ -77,22 +87,23 @@ PRIMARY_SESSION = load_session_strings(1)[0][1]
 def format_help() -> str:
     return (
         "**Moderator Report & Logging Tool**\n"
-        "Validate access to a target Telegram message across multiple user sessions, "
-        "log the results, and trigger automated reports.\n\n"
-        "Commands:\n"
-        "• `/help` — show this message.\n"
-        "• `/set_owner <telegram_id>` — set or change the OWNER_ID (only current owner or unset).\n"
-        "• `/run <target_link> <sessions_count> <requested_count>` — run validation & reporting.\n\n"
-        "Input format:\n"
+        "Quickly validate a target Telegram message across multiple user sessions, log the results, and submit reports with "
+        "clear, auditable updates.\n\n"
+        "Core commands (owner only):\n"
+        "• `/run <target_link> <sessions_count> <requested_count>` — validate and report against a target message.\n"
+        "• `/set_owner <telegram_id>` — assign or change the OWNER_ID when authorized.\n"
+        "• `/set_reason <reason>` — update the report reason (child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other).\n"
+        "• `/set_report_text <text>` — set the report text/message body.\n"
+        "• `/set_total_reports <count>` — record or revise the total number of reports for the log group.\n"
+        "• `/set_links <log_group_link> <group_message_link>` — refresh invite and message links shown in the review panel.\n"
+        "• `/add_session <name> <session_string>` — register an additional session string without redeploying.\n\n"
+        "Input rules for `/run`:\n"
         "• target_link: https://t.me/<username>/<message_id> or https://t.me/c/<internal_id>/<message_id>\n"
         "• sessions_count: integer 1-100 (number of sessions to use)\n"
         "• requested_count: integer 1-500 (for logging reference)\n\n"
-        "Authorization:\n"
-        "• Only OWNER_ID can run /run.\n"
-        "• /set_owner allowed when OWNER_ID is unset or by current owner.\n\n"
-        "Safety:\n"
-        "• Uses Telegram API reports (functions.messages.Report).\n"
-        "• Logging stays inside the configured log group.\n"
+        "Authorization & safety:\n"
+        "• Only OWNER_ID can run owner-level commands.\n"
+        "• Reports are sent via Telegram API (functions.messages.Report) and all logging remains in the configured log group.\n"
     )
 
 
@@ -119,6 +130,24 @@ def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
 
 def reason_from_config() -> types.TypeInputReportReason:
     mapping = {
+        "child_abuse": types.InputReportReasonChildAbuse,
+        "violence": types.InputReportReasonViolence,
+        "illegal_goods": types.InputReportReasonIllegalDrugs,
+        "illegal_adult": types.InputReportReasonPornography,
+        "personal_data": types.InputReportReasonPersonalDetails,
+        "scam": types.InputReportReasonSpam,
+        "copyright": types.InputReportReasonCopyright,
+        "spam": types.InputReportReasonSpam,
+        "other": types.InputReportReasonOther,
+    }
+
+    configured_reason = os.getenv("REPORT_REASON", CONFIG.get("REPORT_REASON"))
+    if configured_reason:
+        normalized = str(configured_reason).strip().lower()
+        if normalized in mapping:
+            return mapping[normalized]()
+
+    legacy_mapping = {
         "REPORT_REASON_CHILD_ABUSE": types.InputReportReasonChildAbuse,
         "REPORT_REASON_VIOLENCE": types.InputReportReasonViolence,
         "REPORT_REASON_ILLEGAL_GOODS": types.InputReportReasonIllegalDrugs,
@@ -129,7 +158,7 @@ def reason_from_config() -> types.TypeInputReportReason:
         "REPORT_REASON_SPAM": types.InputReportReasonSpam,
         "REPORT_REASON_OTHER": types.InputReportReasonOther,
     }
-    for key, cls in mapping.items():
+    for key, cls in legacy_mapping.items():
         val = os.getenv(key, str(CONFIG.get(key, "false"))).lower()
         if val == "true":
             return cls()
@@ -243,16 +272,24 @@ async def handle_run_command(client: Client, message) -> None:
 
     available_sessions = len(sessions)
 
-    panel_text = (
-        "🛰️ **Review Panel Initialized**\n"
-        f"Target: {target_link}\n"
-        f"Chat: {chat_identifier}\n"
-        f"Message ID: {msg_id}\n"
-        f"Requested sessions: {sessions_count}\n"
-        f"Requested count: {requested_count}\n"
-        f"Available sessions: {available_sessions}\n"
-        "Processing..."
-    )
+    panel_lines = [
+        "🛰️ **Review Panel Initialized**",
+        f"Target message: {target_link}",
+        f"Chat reference: {chat_identifier}",
+        f"Message ID: {msg_id}",
+        f"Requested sessions: {sessions_count}",
+        f"Requested count: {requested_count}",
+        f"Available sessions: {available_sessions}",
+        f"Configured total reports: {CONFIG.get('TOTAL_REPORTS') or '—'}",
+        f"Report reason: {CONFIG.get('REPORT_REASON') or 'other'}",
+        f"Report text: {REPORT_TEXT or 'Not set'}",
+    ]
+    if LOG_GROUP_LINK:
+        panel_lines.append(f"Log group link: {LOG_GROUP_LINK}")
+    if GROUP_MESSAGE_LINK:
+        panel_lines.append(f"Group message link: {GROUP_MESSAGE_LINK}")
+    panel_lines.append("Status: processing…")
+    panel_text = "\n".join(panel_lines)
     panel_chat = message.chat.id if message.chat else LOG_GROUP_ID
     panel_id = await send_log_message(client, panel_chat, panel_text)
 
@@ -265,18 +302,23 @@ async def handle_run_command(client: Client, message) -> None:
         processed += 1
         if status == "reachable":
             reachable += 1
-        results.append(f"• {session_name}: {status} ({detail})")
+        results.append(f"• **{session_name}** — {status} ({detail})")
 
         panel_text = (
             "🛰️ **Review Panel**\n"
-            f"Target: {target_link}\n"
-            f"Chat: {chat_identifier}\n"
-            f"Message ID: {msg_id}\n"
-            f"Requested sessions: {sessions_count}\n"
-            f"Requested count: {requested_count}\n"
-            f"Available sessions: {available_sessions}\n"
-            f"Sessions validated: {processed}/{min(sessions_count, available_sessions)}\n"
-            f"Reachable sessions: {reachable}/{processed}\n\n"
+            "**Target details**\n"
+            f"• Link: {target_link}\n"
+            f"• Chat: {chat_identifier} | Message: {msg_id}\n"
+            f"• Requested sessions: {sessions_count} | Requested count: {requested_count}\n"
+            f"• Configured total reports: {CONFIG.get('TOTAL_REPORTS') or '—'}\n"
+            f"• Report reason: {CONFIG.get('REPORT_REASON') or 'other'} | Text: {REPORT_TEXT or 'Not set'}\n"
+            + (f"• Log group link: {LOG_GROUP_LINK}\n" if LOG_GROUP_LINK else "")
+            + (f"• Group message link: {GROUP_MESSAGE_LINK}\n" if GROUP_MESSAGE_LINK else "")
+            + "\n"
+            "**Session results**\n"
+            f"• Available sessions: {available_sessions}\n"
+            f"• Validated: {processed}/{min(sessions_count, available_sessions)}\n"
+            f"• Reachable: {reachable}/{processed}\n\n"
             "\n".join(results)
         )
         if panel_id:
@@ -308,6 +350,147 @@ async def handle_set_owner(client: Client, message) -> None:
     await message.reply_text(f"✅ OWNER_ID set to {new_owner}")
 
 
+def owner_required(message) -> bool:
+    if OWNER_ID is None or not message.from_user:
+        return False
+    return message.from_user.id == OWNER_ID
+
+
+async def handle_set_reason(message) -> None:
+    global REPORT_REASON
+    if not owner_required(message):
+        await message.reply_text("❌ Only the log group owner can update the report reason.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.reply_text("Usage: /set_reason <child_abuse|violence|illegal_goods|illegal_adult|personal_data|scam|copyright|spam|other>")
+        return
+
+    value = parts[1].strip().lower()
+    reason_map = {
+        "child_abuse": types.InputReportReasonChildAbuse,
+        "violence": types.InputReportReasonViolence,
+        "illegal_goods": types.InputReportReasonIllegalDrugs,
+        "illegal_adult": types.InputReportReasonPornography,
+        "personal_data": types.InputReportReasonPersonalDetails,
+        "scam": types.InputReportReasonSpam,
+        "copyright": types.InputReportReasonCopyright,
+        "spam": types.InputReportReasonSpam,
+        "other": types.InputReportReasonOther,
+    }
+
+    if value not in reason_map:
+        await message.reply_text("❌ Invalid reason. Choose one of: child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other.")
+        return
+
+    CONFIG["REPORT_REASON"] = value
+    save_config(CONFIG)
+    REPORT_REASON = reason_map[value]()
+    await message.reply_text(f"✅ Report reason updated to `{value}`.")
+
+
+async def handle_set_report_text(message) -> None:
+    global REPORT_TEXT
+    if not owner_required(message):
+        await message.reply_text("❌ Only the log group owner can update the report text.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2 or not parts[1].strip():
+        await message.reply_text("Usage: /set_report_text <text>")
+        return
+
+    REPORT_TEXT = parts[1].strip()
+    CONFIG["REPORT_TEXT"] = REPORT_TEXT
+    save_config(CONFIG)
+    await message.reply_text("✅ Report text updated.")
+
+
+async def handle_set_total_reports(message) -> None:
+    if not owner_required(message):
+        await message.reply_text("❌ Only the log group owner can update the total reports.")
+        return
+
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.reply_text("Usage: /set_total_reports <count>")
+        return
+
+    try:
+        total_reports = int(parts[1])
+    except ValueError:
+        await message.reply_text("❌ total_reports must be an integer.")
+        return
+
+    if total_reports < 0:
+        await message.reply_text("❌ total_reports cannot be negative.")
+        return
+
+    CONFIG["TOTAL_REPORTS"] = total_reports
+    save_config(CONFIG)
+    await message.reply_text(f"✅ Total reports set to {total_reports}.")
+
+
+async def handle_set_links(message) -> None:
+    global LOG_GROUP_LINK, GROUP_MESSAGE_LINK
+    if not owner_required(message):
+        await message.reply_text("❌ Only the log group owner can update links.")
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) != 3:
+        await message.reply_text("Usage: /set_links <log_group_link> <group_message_link>")
+        return
+
+    log_group_link = parts[1].strip()
+    message_link = parts[2].strip()
+
+    if not (log_group_link.startswith("http://") or log_group_link.startswith("https://")):
+        await message.reply_text("❌ log_group_link must start with http:// or https://")
+        return
+
+    if not (message_link.startswith("http://") or message_link.startswith("https://")):
+        await message.reply_text("❌ group_message_link must start with http:// or https://")
+        return
+
+    LOG_GROUP_LINK = log_group_link
+    GROUP_MESSAGE_LINK = message_link
+    CONFIG["LOG_GROUP_LINK"] = log_group_link
+    CONFIG["GROUP_MESSAGE_LINK"] = message_link
+    save_config(CONFIG)
+    await message.reply_text("✅ Links updated for the review panel.")
+
+
+async def handle_add_session(message) -> None:
+    if not owner_required(message):
+        await message.reply_text("❌ Only the log group owner can add sessions.")
+        return
+
+    parts = message.text.split(maxsplit=2)
+    if len(parts) != 3:
+        await message.reply_text("Usage: /add_session <name> <session_string>")
+        return
+
+    name = parts[1].strip()
+    session_str = parts[2].strip()
+
+    if not name or not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
+        await message.reply_text("❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens).")
+        return
+
+    if len(session_str) < 10:
+        await message.reply_text("❌ Session string looks too short. Please provide a valid session string.")
+        return
+
+    os.makedirs(SESSIONS_DIR, exist_ok=True)
+    dest = os.path.join(SESSIONS_DIR, f"{name}.session")
+    with open(dest, "w", encoding="utf-8") as f:
+        f.write(session_str)
+
+    await message.reply_text(f"✅ Session `{name}` added. It will be used on the next /run.")
+
+
 async def main():
     app = Client(
         "moderator_tool",
@@ -327,6 +510,26 @@ async def main():
     @app.on_message(filters.command("run"))
     async def _run(client, msg):
         await handle_run_command(client, msg)
+
+    @app.on_message(filters.command("set_reason"))
+    async def _set_reason(_, msg):
+        await handle_set_reason(msg)
+
+    @app.on_message(filters.command("set_report_text"))
+    async def _set_report_text(_, msg):
+        await handle_set_report_text(msg)
+
+    @app.on_message(filters.command("set_total_reports"))
+    async def _set_total_reports(_, msg):
+        await handle_set_total_reports(msg)
+
+    @app.on_message(filters.command("set_links"))
+    async def _set_links(_, msg):
+        await handle_set_links(msg)
+
+    @app.on_message(filters.command("add_session"))
+    async def _add_session(_, msg):
+        await handle_add_session(msg)
 
     await app.start()
     print("Moderator tool is running...")

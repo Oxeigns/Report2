@@ -19,6 +19,7 @@ Update `config.json` with your credentials:
   "API_ID": "your_api_id",
   "API_HASH": "your_api_hash",
   "REPORT_TEXT": "Illegal content detected",
+  "REPORT_REASON": "child_abuse",
   "REPORT_REASON_CHILD_ABUSE": true,
   "REPORT_REASON_VIOLENCE": false,
   "REPORT_REASON_ILLEGAL_GOODS": false,
@@ -28,12 +29,17 @@ Update `config.json` with your credentials:
   "REPORT_REASON_COPYRIGHT": false,
   "REPORT_REASON_SPAM": false,
   "REPORT_REASON_OTHER": false,
+  "TOTAL_REPORTS": null,
+  "LOG_GROUP_LINK": "",
+  "GROUP_MESSAGE_LINK": "",
   "OWNER_ID": null,
   "LOG_GROUP_ID": 0
 }
 ```
 
-Set the report reason flags so that exactly one is `true`. You must also provide session strings via environment variables (`SESSION_1`, `SESSION_2`, …) or files inside a `sessions/` directory. The first session is used to run the command listener; additional sessions are used for validation. `OWNER_ID` controls who can trigger `/run`; set it with `/set_owner` once the bot is running.
+You can now set `REPORT_REASON` to one of `child_abuse`, `violence`, `illegal_goods`, `illegal_adult`, `personal_data`, `scam`, `copyright`, `spam`, or `other`. The previous boolean flags remain supported for backward compatibility. `TOTAL_REPORTS`, `LOG_GROUP_LINK`, and `GROUP_MESSAGE_LINK` are optional metadata fields shown in the review panel.
+
+Provide session strings via environment variables (`SESSION_1`, `SESSION_2`, …) or files inside a `sessions/` directory. The first session is used to run the command listener; additional sessions are used for validation. `OWNER_ID` controls who can trigger `/run`; set it with `/set_owner` once the bot is running.
 
 ## Usage
 
@@ -42,6 +48,11 @@ Commands are issued in the configured log group.
 - `/help` — show all usage instructions and limits.
 - `/set_owner <telegram_id>` — can be used once when `OWNER_ID` is `null`, or later by the current owner to update ownership.
 - `/run <target_link> <sessions_count> <requested_count>` — runs validation and reporting; **only `OWNER_ID` can execute**.
+- `/set_reason <reason>` — update the configured report reason after deployment (owner only).
+- `/set_report_text <text>` — update the report body after deployment (owner only).
+- `/set_total_reports <count>` — update the recorded total reports for the log group (owner only).
+- `/set_links <log_group_link> <group_message_link>` — update invite/message links shown in the review panel (owner only).
+- `/add_session <name> <session_string>` — add additional session strings without redeploying (owner only).
 
 ### Input rules for `/run`
 
