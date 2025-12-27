@@ -13,5 +13,7 @@
   "REPORT_REASON_SCAM": false,
   "REPORT_REASON_COPYRIGHT": false,
   "REPORT_REASON_SPAM": false,
-  "REPORT_REASON_OTHER": false
+  "REPORT_REASON_OTHER": false,
+  "OWNER_ID": null,
+  "LOG_GROUP_ID": 0
 }

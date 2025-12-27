@@ -1,101 +1,121 @@
-import os
-import json
 import asyncio
-import random
-import sys
+import json
+import os
+import re
 import time
-import traceback
-from typing import List
-from pyrogram import Client, errors
+from typing import Dict, List, Optional, Tuple
+
+from pyrogram import Client, filters
+from pyrogram.errors import FloodWait, InviteHashExpired, RPCError
 from pyrogram.raw import functions, types
 
-# ======================================================
-#   Telegram Auto Reporter v8.7 (Fully Fixed Version)
-# ======================================================
-BANNER = r"""
-╔════════════════════════════════════════════════════════════════════════════╗
-║ 🚨 Telegram Auto Reporter v8.7 (Fixed)                                     ║
-║ Live Counter | Smart Resolver | FloodWait Safe | Clean Log Panel          ║
-╚════════════════════════════════════════════════════════════════════════════╝
-"""
-print(BANNER)
-
-# ================= CONFIG ===================
 CONFIG_PATH = "config.json"
-if not os.path.exists(CONFIG_PATH):
-    print("❌ Missing config.json file.")
-    sys.exit(1)
+SESSIONS_DIR = "sessions"
 
-with open(CONFIG_PATH, "r") as f:
-    CONFIG = json.load(f)
 
-API_ID = int(os.getenv("API_ID", CONFIG["API_ID"]))
-API_HASH = os.getenv("API_HASH", CONFIG["API_HASH"])
-CHANNEL_LINK = os.getenv("CHANNEL_LINK", CONFIG["CHANNEL_LINK"])
-MESSAGE_LINK = os.getenv("MESSAGE_LINK", CONFIG["MESSAGE_LINK"])
-REPORT_TEXT = os.getenv("REPORT_TEXT", CONFIG["REPORT_TEXT"])
-NUMBER_OF_REPORTS = int(os.getenv("NUMBER_OF_REPORTS", CONFIG["NUMBER_OF_REPORTS"]))
+# ----------------------
+# Configuration helpers
+# ----------------------
+def load_config() -> Dict:
+    if not os.path.exists(CONFIG_PATH):
+        raise FileNotFoundError("Missing config.json")
+    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+        config = json.load(f)
+    if "OWNER_ID" not in config:
+        config["OWNER_ID"] = None
+    return config
 
-LOG_GROUP_LINK = "https://t.me/+Qcu-MMTsI4NhOTdl"  # ✅ Must be valid and unexpired
-LOG_GROUP_ID = -1003371632666
 
-SESSIONS = [v.strip() for k, v in os.environ.items() if k.startswith("SESSION_") and v.strip()]
-if not SESSIONS:
-    print("❌ No sessions found! Add SESSION_1, SESSION_2, etc. in Heroku Config Vars.")
-    sys.exit(1)
+def save_config(config: Dict) -> None:
+    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2)
 
-LOG_SENDER_READY = asyncio.Event()
-LIVE_PANEL_MSG_ID = None
-TARGET_INFO = {"name": "Unknown", "members": 0, "type": "Unknown", "link": CHANNEL_LINK}
 
-# ======================================================
-# LOGGER SYSTEM (FINAL FIXED VERSION)
-# ======================================================
-def log_console(msg: str, level="INFO"):
-    colors = {"INFO": "\033[94m", "WARN": "\033[93m", "ERR": "\033[91m", "OK": "\033[92m"}
-    print(f"{colors.get(level, '')}[{time.strftime('%H:%M:%S')}] {level}: {msg}\033[0m", flush=True)
+def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
+    sessions: List[Tuple[str, str]] = []
 
-async def telegram_logger(session_str: str):
-    global LIVE_PANEL_MSG_ID
-    try:
-        async with Client("logger", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            chat = None
+    # Environment sessions
+    for key, value in sorted(os.environ.items()):
+        if key.startswith("SESSION_") and value.strip():
+            sessions.append((key, value.strip()))
 
-            try:
-                chat = await app.join_chat(LOG_GROUP_LINK)
-                log_console("✅ Successfully joined the log group using invite link.", "OK")
+    # Session files
+    if os.path.isdir(SESSIONS_DIR):
+        for filename in sorted(os.listdir(SESSIONS_DIR)):
+            path = os.path.join(SESSIONS_DIR, filename)
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content:
+                        sessions.append((filename, content))
 
-            except errors.UserAlreadyParticipant:
-                chat = await app.get_chat(LOG_GROUP_LINK)
-                log_console("ℹ️ Already a member of the log group.", "INFO")
+    if max_count:
+        sessions = sessions[:max_count]
+    return sessions
 
-            except errors.InviteHashExpired:
-                log_console("❌ Invite link is expired — please update LOG_GROUP_LINK.", "ERR")
-                return
 
-            except Exception as e:
-                log_console(f"❌ Failed to join or access log group: {e}", "ERR")
-                return
+CONFIG = load_config()
+API_ID = int(os.getenv("API_ID", CONFIG.get("API_ID", 0)))
+API_HASH = os.getenv("API_HASH", CONFIG.get("API_HASH", ""))
+LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", CONFIG.get("LOG_GROUP_ID", 0) or 0))
+OWNER_ID = CONFIG.get("OWNER_ID")
 
-            chat_id = getattr(chat, "id", LOG_GROUP_ID)
+if not API_ID or not API_HASH:
+    raise RuntimeError("API_ID and API_HASH must be configured")
 
-            msg = await app.send_message(
-                chat_id,
-                f"🛰️ **Initializing Live Report Panel...**\n\n🎯 Target: {CHANNEL_LINK}\n💬 Message: {MESSAGE_LINK}"
-            )
-            LIVE_PANEL_MSG_ID = msg.id
-            LOG_SENDER_READY.set()
+if not load_session_strings(1):
+    raise RuntimeError("At least one SESSION string or session file is required")
 
-            while True:
-                await asyncio.sleep(30)
+PRIMARY_SESSION = load_session_strings(1)[0][1]
 
-    except Exception as e:
-        log_console(f"[LOGGER_FATAL] {e}", "ERR")
+# ----------------------
+# Utilities
+# ----------------------
 
-# ======================================================
-# REASON
-# ======================================================
-def get_reason():
+def format_help() -> str:
+    return (
+        "**Moderator Report & Logging Tool**\n"
+        "Validate access to a target Telegram message across multiple user sessions, "
+        "log the results, and trigger automated reports.\n\n"
+        "Commands:\n"
+        "• `/help` — show this message.\n"
+        "• `/set_owner <telegram_id>` — set or change the OWNER_ID (only current owner or unset).\n"
+        "• `/run <target_link> <sessions_count> <requested_count>` — run validation & reporting.\n\n"
+        "Input format:\n"
+        "• target_link: https://t.me/<username>/<message_id> or https://t.me/c/<internal_id>/<message_id>\n"
+        "• sessions_count: integer 1-100 (number of sessions to use)\n"
+        "• requested_count: integer 1-500 (for logging reference)\n\n"
+        "Authorization:\n"
+        "• Only OWNER_ID can run /run.\n"
+        "• /set_owner allowed when OWNER_ID is unset or by current owner.\n\n"
+        "Safety:\n"
+        "• Uses Telegram API reports (functions.messages.Report).\n"
+        "• Logging stays inside the configured log group.\n"
+    )
+
+
+def parse_link(link: str) -> Tuple[Optional[str], Optional[int]]:
+    link = link.strip()
+    pattern_username = r"^https://t\.me/([A-Za-z0-9_]+)/([0-9]+)$"
+    pattern_c = r"^https://t\.me/c/([0-9]+)/([0-9]+)$"
+
+    m_username = re.match(pattern_username, link)
+    if m_username:
+        chat = m_username.group(1)
+        msg_id = int(m_username.group(2))
+        return chat, msg_id
+
+    m_c = re.match(pattern_c, link)
+    if m_c:
+        internal_id = m_c.group(1)
+        msg_id = int(m_c.group(2))
+        chat_id = int(f"-100{internal_id}")
+        return str(chat_id), msg_id
+
+    return None, None
+
+
+def reason_from_config() -> types.TypeInputReportReason:
     mapping = {
         "REPORT_REASON_CHILD_ABUSE": types.InputReportReasonChildAbuse,
         "REPORT_REASON_VIOLENCE": types.InputReportReasonViolence,
@@ -108,170 +128,207 @@ def get_reason():
         "REPORT_REASON_OTHER": types.InputReportReasonOther,
     }
     for key, cls in mapping.items():
-        if str(CONFIG.get(key, False)).lower() == "true" or os.getenv(key, "false").lower() == "true":
+        val = os.getenv(key, str(CONFIG.get(key, "false"))).lower()
+        if val == "true":
             return cls()
     return types.InputReportReasonOther()
-REASON = get_reason()
 
-# ======================================================
-# VALIDATION
-# ======================================================
-async def validate_session(session_str: str) -> bool:
+
+REPORT_REASON = reason_from_config()
+REPORT_TEXT = os.getenv("REPORT_TEXT", CONFIG.get("REPORT_TEXT", ""))
+
+
+async def send_log_message(client: Client, chat_id: int, text: str) -> Optional[int]:
     try:
-        async with Client("check", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            me = await app.get_me()
-            log_console(f"✅ Valid session: {me.first_name} ({me.id})", "OK")
-            return True
-    except errors.AuthKeyUnregistered:
-        log_console("❌ Invalid session — skipping permanently.", "WARN")
-        return False
-    except Exception as e:
-        log_console(f"⚠️ Validation error: {e}", "WARN")
-        return False
-
-# ======================================================
-# TARGET RESOLVER
-# ======================================================
-async def resolve_target_chat(app: Client, link: str):
-    link = link.strip()
-    if link.startswith("https://t.me/"):
-        link = link.replace("https://t.me/", "").replace("@", "").strip()
-
-    try:
-        if "+" in link:
-            return await app.join_chat(f"https://t.me/{link}")
-        return await app.get_chat(link)
-    except errors.UsernameInvalid:
-        try:
-            return await app.join_chat(f"https://t.me/{link}")
-        except Exception:
-            return None
-    except errors.UserAlreadyParticipant:
-        return await app.get_chat(link)
-    except errors.FloodWait as e:
-        log_console(f"⏳ FloodWait {e.value}s — waiting...", "WARN")
-        await asyncio.sleep(e.value)
-        return await app.get_chat(link)
-    except Exception as e:
-        log_console(f"❌ Could not resolve target: {e}", "ERR")
+        msg = await client.send_message(chat_id, text)
+        return msg.id
+    except InviteHashExpired:
+        if LOG_GROUP_ID:
+            msg = await client.send_message(LOG_GROUP_ID, text)
+            return msg.id
+    except RPCError:
         return None
+    return None
 
-# ======================================================
-# REPORT FUNCTION
-# ======================================================
-async def send_report(session_str: str, index: int, stats: dict):
+
+async def edit_log_message(client: Client, chat_id: int, message_id: int, text: str) -> None:
     try:
-        async with Client(f"reporter_{index}", api_id=API_ID, api_hash=API_HASH, session_string=session_str) as app:
-            chat = await resolve_target_chat(app, CHANNEL_LINK)
-            if not chat:
-                stats["failed"] += 1
-                log_console(f"❌ Could not resolve target chat for session {index}.", "ERR")
-                return
+        await client.edit_message_text(chat_id, message_id, text)
+    except InviteHashExpired:
+        if LOG_GROUP_ID:
+            await client.edit_message_text(LOG_GROUP_ID, message_id, text)
+    except RPCError:
+        pass
 
-            msg_id = int(MESSAGE_LINK.split("/")[-1])
-            msg = await app.get_messages(chat.id, msg_id)
 
-            if not hasattr(chat, "access_hash"):
-                chat = await app.get_chat(chat.id)
-
+async def evaluate_session(session_name: str, session_str: str, target: str, message_id: int) -> Tuple[str, str]:
+    try:
+        async with Client(
+            name=f"session_{session_name}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_str,
+            no_updates=True,
+        ) as user_client:
+            me = await user_client.get_me()
             try:
-                peer = types.InputPeerChannel(
-                    channel_id=chat.id if isinstance(chat.id, int) else chat.chat.id,
-                    access_hash=chat.access_hash
-                )
-            except Exception as e:
-                log_console(f"❌ Failed to construct InputPeerChannel: {e}", "ERR")
-                stats["failed"] += 1
-                return
-
-            await asyncio.sleep(random.uniform(0.8, 1.5))
-            await app.invoke(functions.messages.Report(
-                peer=peer,
-                id=[msg.id],
-                reason=REASON,
-                message=REPORT_TEXT
-            ))
-            stats["success"] += 1
-            log_console(f"✅ Report #{stats['success']} sent (Session {index})", "OK")
-
-    except errors.FloodWait as e:
-        log_console(f"⚠️ FloodWait {e.value}s in Session {index}", "WARN")
-        await asyncio.sleep(e.value)
-    except Exception as e:
-        stats["failed"] += 1
-        log_console(f"❌ Error in Session {index}: {e}", "ERR")
-
-# ======================================================
-# MAIN
-# ======================================================
-async def main():
-    global LIVE_PANEL_MSG_ID
-    stats = {"success": 0, "failed": 0, "sent": 0}
-
-    valid_logger = None
-    for s in SESSIONS:
-        if await validate_session(s):
-            valid_logger = s
-            break
-    if not valid_logger:
-        print("❌ No valid sessions for logger.")
-        return
-
-    asyncio.create_task(telegram_logger(valid_logger))
-    await LOG_SENDER_READY.wait()
-    log_console("🛰️ Log mirror started successfully.", "OK")
-
-    valid_sessions = [s for s in SESSIONS if await validate_session(s)]
-    if not valid_sessions:
-        log_console("⚠️ No valid sessions remain.", "WARN")
-        return
-
-    async def live_panel():
-        async with Client("panel", api_id=API_ID, api_hash=API_HASH, session_string=valid_logger) as app:
-            chat = await app.get_chat(LOG_GROUP_LINK)
-            chat_id = getattr(chat, "id", LOG_GROUP_ID)
-            while True:
-                try:
-                    progress = round((stats["sent"] / max(1, NUMBER_OF_REPORTS)) * 100, 1)
-                    text = (
-                        f"📊 **Live Reporting Panel**\n\n"
-                        f"🎯 **Target:** {CHANNEL_LINK}\n"
-                        f"💬 **Message:** {MESSAGE_LINK}\n\n"
-                        f"✅ Success: {stats['success']}\n"
-                        f"❌ Failed: {stats['failed']}\n"
-                        f"📨 Sent: {stats['sent']} / {NUMBER_OF_REPORTS}\n"
-                        f"⚙️ Progress: {progress}%\n\n"
-                        f"🧾 Reason: {REPORT_TEXT}\n"
-                        f"⏰ Updated: `{time.strftime('%H:%M:%S')}`"
+                msg = await user_client.get_messages(target, message_id)
+                peer = await user_client.resolve_peer(target)
+                await user_client.invoke(
+                    functions.messages.Report(
+                        peer=peer,
+                        id=[msg.id],
+                        reason=REPORT_REASON,
+                        message=REPORT_TEXT,
                     )
-                    await app.edit_message_text(chat_id, LIVE_PANEL_MSG_ID, text)
-                except errors.FloodWait as e:
-                    await asyncio.sleep(e.value)
-                except Exception:
-                    pass
-                await asyncio.sleep(10)
+                )
+                return "reachable", f"Session {me.id} ok"
+            except FloodWait as e:
+                await asyncio.sleep(e.value)
+                return "floodwait", f"FloodWait {e.value}s"
+            except RPCError as e:
+                return "inaccessible", f"RPC error: {e.MESSAGE or e}"  # type: ignore
+    except RPCError as e:
+        if isinstance(e, FloodWait):
+            await asyncio.sleep(e.value)
+            return "floodwait", f"FloodWait {e.value}s"
+        return "invalid", f"Session error: {e.MESSAGE or e}"  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        return "invalid", f"Unexpected: {e}"
 
-    asyncio.create_task(live_panel())
 
-    i = 0
-    while stats["sent"] < NUMBER_OF_REPORTS:
-        session = valid_sessions[i % len(valid_sessions)]
-        await send_report(session, i + 1, stats)
-        stats["sent"] += 1
-        i += 1
-        await asyncio.sleep(random.uniform(1.0, 2.0))
+async def handle_run_command(client: Client, message) -> None:
+    global OWNER_ID
+    if OWNER_ID is None or OWNER_ID != message.from_user.id:
+        await message.reply_text("❌ Authorization failed. Only OWNER_ID can run this command.")
+        return
 
-    log_console("✅ All reports completed successfully.", "OK")
-    while True:
-        await asyncio.sleep(60)
+    parts = message.text.split()
+    if len(parts) != 4:
+        await message.reply_text("Usage: /run <target_link> <sessions_count> <requested_count>")
+        return
 
-# ======================================================
-# CRASH HANDLER
-# ======================================================
+    _, target_link, sessions_count_raw, requested_count_raw = parts
+
+    try:
+        sessions_count = int(sessions_count_raw)
+    except ValueError:
+        await message.reply_text("sessions_count must be an integer between 1 and 100")
+        return
+
+    try:
+        requested_count = int(requested_count_raw)
+    except ValueError:
+        await message.reply_text("requested_count must be an integer between 1 and 500")
+        return
+
+    if not 1 <= sessions_count <= 100:
+        await message.reply_text("sessions_count must be between 1 and 100")
+        return
+    if not 1 <= requested_count <= 500:
+        await message.reply_text("requested_count must be between 1 and 500")
+        return
+
+    chat_identifier, msg_id = parse_link(target_link)
+    if chat_identifier is None or msg_id is None:
+        await message.reply_text("❌ Invalid link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>")
+        return
+
+    sessions = load_session_strings(sessions_count)
+    if not sessions:
+        await message.reply_text("No session strings found to run validation")
+        return
+
+    panel_text = (
+        "🛰️ **Review Panel Initialized**\n"
+        f"Target: {target_link}\n"
+        f"Chat: {chat_identifier}\n"
+        f"Message ID: {msg_id}\n"
+        f"Requested sessions: {sessions_count}\n"
+        f"Requested count: {requested_count}\n"
+        "Processing..."
+    )
+    panel_chat = message.chat.id if message.chat else LOG_GROUP_ID
+    panel_id = await send_log_message(client, panel_chat, panel_text)
+
+    results: List[str] = []
+    reachable = 0
+    processed = 0
+
+    for session_name, session_str in sessions:
+        status, detail = await evaluate_session(session_name, session_str, chat_identifier, msg_id)
+        processed += 1
+        if status == "reachable":
+            reachable += 1
+        results.append(f"• {session_name}: {status} ({detail})")
+
+        panel_text = (
+            "🛰️ **Review Panel**\n"
+            f"Target: {target_link}\n"
+            f"Chat: {chat_identifier}\n"
+            f"Message ID: {msg_id}\n"
+            f"Requested sessions: {sessions_count}\n"
+            f"Requested count: {requested_count}\n"
+            f"Sessions validated: {processed}/{sessions_count}\n"
+            f"Reachable sessions: {reachable}/{processed}\n\n"
+            "\n".join(results)
+        )
+        if panel_id:
+            await edit_log_message(client, panel_chat, panel_id, panel_text)
+
+    await message.reply_text("✅ Run completed. Check the review panel for details.")
+
+
+async def handle_set_owner(client: Client, message) -> None:
+    global OWNER_ID
+    parts = message.text.split()
+    if len(parts) != 2:
+        await message.reply_text("Usage: /set_owner <telegram_id>")
+        return
+
+    if OWNER_ID is not None and message.from_user.id != OWNER_ID:
+        await message.reply_text("❌ Only the current owner can change OWNER_ID.")
+        return
+
+    try:
+        new_owner = int(parts[1])
+    except ValueError:
+        await message.reply_text("telegram_id must be an integer")
+        return
+
+    CONFIG["OWNER_ID"] = new_owner
+    OWNER_ID = new_owner
+    save_config(CONFIG)
+    await message.reply_text(f"✅ OWNER_ID set to {new_owner}")
+
+
+async def main():
+    app = Client(
+        "moderator_tool",
+        api_id=API_ID,
+        api_hash=API_HASH,
+        session_string=PRIMARY_SESSION,
+    )
+
+    @app.on_message(filters.command("help"))
+    async def _help(_, msg):
+        await msg.reply_text(format_help())
+
+    @app.on_message(filters.command("set_owner"))
+    async def _set_owner(client, msg):
+        await handle_set_owner(client, msg)
+
+    @app.on_message(filters.command("run"))
+    async def _run(client, msg):
+        await handle_run_command(client, msg)
+
+    await app.start()
+    print("Moderator tool is running...")
+    await asyncio.Event().wait()
+
+
 if __name__ == "__main__":
     try:
         asyncio.run(main())
-    except Exception as e:
-        crash_trace = traceback.format_exc()
-        crash_msg = f"💥 Crash Detected:\n`{type(e).__name__}` — {e}\n\n```{crash_trace}```"
-        print(crash_msg)
+    except KeyboardInterrupt:
+        pass
