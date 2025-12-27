@@ -1,78 +1,55 @@
 # 🚨 Moderator Report & Logging Tool
 
-This project is a **Pyrogram-based moderator helper** that validates whether a target Telegram message is reachable across multiple user sessions, logs the results in a log group, and issues automated Telegram complaints using `functions.messages.Report`.
+A **button-driven Telegram reporting system** built on Pyrogram. Validate targets across multiple user sessions, log the results in a dedicated log group, and run complaint submissions with live progress updates.
 
-## Features
+## Deployment-time setup (one-time)
 
-- Multi-session validation with detailed per-session status
-- Automated complaint submission using `functions.messages.Report`
-- Live review panel inside the log group with ongoing updates
-- Strict command permissions via `OWNER_ID`
-- Clear help command and safe error handling
+Set `API_ID`, `API_HASH`, and provide exactly one primary session string (via `SESSION_1` or a file in `sessions/`). During first start, set:
 
-## Configuration
+- `OWNER_ID` — only this user can change settings.
+- `LOG_GROUP_LINK` — where control panels and logs are posted (optional `LOG_GROUP_ID` fallback).
 
-Update `config.json` with your credentials:
+All other options are configured later from inside the log group.
+
+`config.json` defaults are provided for convenience:
 
 ```json
 {
   "API_ID": "your_api_id",
   "API_HASH": "your_api_hash",
-  "REPORT_TEXT": "Illegal content detected",
-  "REPORT_REASON": "child_abuse",
-  "REPORT_REASON_CHILD_ABUSE": true,
-  "REPORT_REASON_VIOLENCE": false,
-  "REPORT_REASON_ILLEGAL_GOODS": false,
-  "REPORT_REASON_ILLEGAL_ADULT": false,
-  "REPORT_REASON_PERSONAL_DATA": false,
-  "REPORT_REASON_SCAM": false,
-  "REPORT_REASON_COPYRIGHT": false,
-  "REPORT_REASON_SPAM": false,
-  "REPORT_REASON_OTHER": false,
+  "REPORT_TEXT": "",
+  "REPORT_REASON": "other",
+  "REPORT_TYPE": "standard",
   "TOTAL_REPORTS": null,
+  "REPORT_SESSION_LIMIT": 0,
+  "OWNER_ID": null,
+  "LOG_GROUP_ID": 0,
   "LOG_GROUP_LINK": "",
   "GROUP_MESSAGE_LINK": "",
-  "OWNER_ID": null,
-  "LOG_GROUP_ID": 0
+  "TARGET_GROUP_LINK": "",
+  "TARGET_MESSAGE_LINK": ""
 }
 ```
 
-You can now set `REPORT_REASON` to one of `child_abuse`, `violence`, `illegal_goods`, `illegal_adult`, `personal_data`, `scam`, `copyright`, `spam`, or `other`. The previous boolean flags remain supported for backward compatibility. `TOTAL_REPORTS`, `LOG_GROUP_LINK`, and `GROUP_MESSAGE_LINK` are optional metadata fields shown in the review panel.
+## Post-deployment owner controls
 
-Provide session strings via environment variables (`SESSION_1`, `SESSION_2`, …) or files inside a `sessions/` directory. The first session is used to run the command listener; additional sessions are used for validation. `OWNER_ID` controls who can trigger `/run`; set it with `/set_owner` once the bot is running.
+From the log group (owner only):
 
-## Usage
+- Add more sessions at any time without redeploying.
+- Set or change the target group/channel link and the exact message link.
+- Configure report type, reason, body text, session limits, and number of reports.
+- Update log-group metadata shown on panels.
 
-Commands are issued in the configured log group.
+Changes are persisted immediately to `config.json`.
 
-- `/help` — show all usage instructions and limits.
-- `/set_owner <telegram_id>` — can be used once when `OWNER_ID` is `null`, or later by the current owner to update ownership.
-- `/run <group_link> <message_link> <sessions_count> <requested_count>` — joins the chat, validates the target, and runs reporting; **only `OWNER_ID` can execute**.
-- `/set_reason <reason>` — update the configured report reason after deployment (owner only).
-- `/set_report_text <text>` — update the report body after deployment (owner only).
-- `/set_total_reports <count>` — update the recorded total reports for the log group (owner only).
-- `/set_links <log_group_link> <group_message_link>` — update invite/message links shown in the review panel (owner only).
-- `/add_session <name> <session_string>` — add additional session strings without redeploying (owner only).
+## Guided usage
 
-### Input rules for `/run`
+1. Send `/start` in the log group or a private chat with the owner to open the control panel.
+2. Use the buttons to add sessions, set/change the target, configure report settings, and launch reporting.
+3. The bot validates targets by joining with every session (public or private links, including `https://t.me/+invite` and `https://t.me/c/<id>/<msg>`).
+4. A live reporting panel shows total/active sessions, successes, failures, and lets you pause/resume or retarget instantly.
 
-- `group_link` must be any valid Telegram group or channel link (public @username or invite such as `https://t.me/+<code>`).
-- `message_link` must be `https://t.me/<username>/<message_id>` or `https://t.me/c/<internal_id>/<message_id>`.
-- `sessions_count` must be an integer between **1** and **100** (how many sessions to test).
-- `requested_count` must be an integer between **1** and **500** (logged for reference).
-
-If any validation fails, the bot returns a clear error instead of running. Invalid links, out-of-range limits, or unauthorized users are rejected with explanations.
-
-### Review panel
-
-When `/run` is executed by the owner, the tool:
-
-1. Iterates through the available sessions (up to `sessions_count`).
-2. For each session, connects, validates with `get_me()`, fetches the target message, and attempts `functions.messages.Report`.
-3. Logs the accessibility result (reachable, inaccessible, floodwait, invalid) in the log group.
-4. Edits a live **Review Panel** message with target link, parsed chat/message IDs, requested counts, available sessions, validated session totals, reachable totals, and per-session errors.
- 
-FloodWaits are handled automatically with pauses, and if the log group invite link expires the tool falls back to `LOG_GROUP_ID` when possible.
+Legacy commands (`/set_owner`, `/set_reason`, `/set_report_text`, `/set_total_reports`, `/set_links`, `/add_session`, `/run`) remain available but the button flow is recommended.
 
 ## Safety Notice
 
@@ -83,10 +60,9 @@ FloodWaits are handled automatically with pauses, and if the log group invite li
 
 [![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/Oxeigns/Report2/tree/main)
 
-
 ```bash
 pip install -r requirements.txt
 python app.py
 ```
 
-Ensure you have set the required environment variables and sessions before starting the tool.
+Ensure the primary session and API credentials are set before starting the tool.

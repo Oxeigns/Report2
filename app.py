@@ -75,6 +75,10 @@ def load_config() -> Dict:
     config.setdefault("TOTAL_REPORTS", None)
     config.setdefault("LOG_GROUP_LINK", "")
     config.setdefault("GROUP_MESSAGE_LINK", "")
+    config.setdefault("TARGET_GROUP_LINK", "")
+    config.setdefault("TARGET_MESSAGE_LINK", "")
+    config.setdefault("REPORT_SESSION_LIMIT", 0)
+    config.setdefault("REPORT_TYPE", "standard")
 
     return config
 
@@ -84,6 +88,21 @@ def save_config(config: Dict) -> None:
     with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
     os.replace(tmp_path, CONFIG_PATH)
+
+
+def persist_report_settings(state: ConversationState) -> None:
+    CONFIG["REPORT_TEXT"] = state.report.report_text
+    CONFIG["REPORT_REASON"] = state.report.report_reason_key
+    CONFIG["REPORT_SESSION_LIMIT"] = state.report.session_limit
+    CONFIG["TOTAL_REPORTS"] = state.report.report_total
+    CONFIG["REPORT_TYPE"] = state.report.report_type
+    save_config(CONFIG)
+
+
+def persist_target(state: ConversationState) -> None:
+    CONFIG["TARGET_GROUP_LINK"] = state.target.group_link or ""
+    CONFIG["TARGET_MESSAGE_LINK"] = state.target.message_link or ""
+    save_config(CONFIG)
 
 
 def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
@@ -117,6 +136,16 @@ def get_state(user_id: int) -> ConversationState:
             CONFIG.get("REPORT_REASON") or "other"
         )
         USER_STATES[user_id].report.report_total = CONFIG.get("TOTAL_REPORTS")
+        USER_STATES[user_id].report.report_type = CONFIG.get("REPORT_TYPE", "standard")
+        USER_STATES[user_id].report.session_limit = int(
+            CONFIG.get("REPORT_SESSION_LIMIT") or 0
+        )
+        if CONFIG.get("TARGET_GROUP_LINK") and CONFIG.get("TARGET_MESSAGE_LINK"):
+            chat_identifier, message_id = parse_link(CONFIG["TARGET_MESSAGE_LINK"])
+            USER_STATES[user_id].target.group_link = CONFIG["TARGET_GROUP_LINK"]
+            USER_STATES[user_id].target.message_link = CONFIG["TARGET_MESSAGE_LINK"]
+            USER_STATES[user_id].target.chat_identifier = chat_identifier
+            USER_STATES[user_id].target.message_id = message_id
     return USER_STATES[user_id]
 
 
@@ -142,39 +171,43 @@ PRIMARY_SESSION = load_session_strings(1)[0][1]
 
 def format_help() -> str:
     return (
-        "**Moderator Report & Logging Tool**\n"
-        "Quickly validate a target Telegram message across multiple user sessions, log the results, and submit reports with "
-        "clear, auditable updates.\n\n"
-        "Core commands (owner only):\n"
-        "• `/run <group_link> <message_link> <sessions_count> <requested_count>` — join the chat, validate the message, and report.\n"
-        "• `/set_owner <telegram_id>` — assign or change the OWNER_ID when authorized.\n"
-        "• `/set_reason <reason>` — update the report reason (child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other).\n"
-        "• `/set_report_text <text>` — set the report text/message body.\n"
-        "• `/set_total_reports <count>` — record or revise the total number of reports for the log group.\n"
-        "• `/set_links <log_group_link> <group_message_link>` — refresh invite and message links shown in the review panel.\n"
-        "• `/add_session <name> <session_string>` — register an additional session string without redeploying.\n\n"
-        "Input rules for `/run`:\n"
-        "• group_link: Any public or private Telegram group/channel link (invite or @username).\n"
-        "• message_link: https://t.me/<username>/<message_id> or https://t.me/c/<internal_id>/<message_id>\n"
-        "• sessions_count: integer 1-100 (number of sessions to use)\n"
-        "• requested_count: integer 1-500 (for logging reference)\n\n"
-        "Authorization & safety:\n"
-        "• Only OWNER_ID can run owner-level commands.\n"
-        "• Reports are sent via Telegram API (functions.messages.Report) and all logging remains in the configured log group.\n"
+        "**Guided Telegram Reporting System**\n"
+        "Everything is driven by buttons from the log group or a private chat with the owner. Use the cards to add sessions, "
+        "select a target, configure report settings, and launch reporting without redeploying.\n\n"
+        "**How to use**\n"
+        "1) Press /start to open the main control panel.\n"
+        "2) Add extra sessions when prompted or continue.\n"
+        "3) Set the target group/channel link and the exact message link. We validate across all sessions automatically.\n"
+        "4) Configure report type, reason, text, and number of reports from the buttons.\n"
+        "5) Start reporting to open a live panel with pause/resume and change-target actions.\n\n"
+        "**Owner-only controls**\n"
+        "• Add sessions after deployment.\n"
+        "• Update target links, message links, report type, reason, text, and requested totals at any time.\n"
+        "• Change log group / message metadata shown on the live panels.\n\n"
+        "**Link formats accepted**\n"
+        "• Groups/Channels: https://t.me/<username>, https://t.me/+<invite>, https://t.me/joinchat/<invite>.\n"
+        "• Messages: https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>.\n\n"
+        "Clear errors are shown for invalid links, expired invites, or inaccessible messages."
     )
 
 
 def start_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         [
-            [
-                InlineKeyboardButton("➕ Add Sessions", callback_data="add_sessions"),
-                InlineKeyboardButton("🎯 Set Target", callback_data="setup_target"),
-            ],
-            [
-                InlineKeyboardButton("⚙️ Settings", callback_data="configure"),
-                InlineKeyboardButton("ℹ️ Help", callback_data="show_help"),
-            ],
+            [InlineKeyboardButton("➕ Add New Sessions", callback_data="add_sessions_prompt")],
+            [InlineKeyboardButton("🎯 Set / Change Target", callback_data="setup_target")],
+            [InlineKeyboardButton("⚙️ Configure Report Settings", callback_data="configure")],
+            [InlineKeyboardButton("🚀 Start Reporting", callback_data="begin_report")],
+            [InlineKeyboardButton("ℹ️ Help", callback_data="show_help")],
+        ]
+    )
+
+
+def add_sessions_prompt_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("Yes, Add Sessions", callback_data="add_sessions")],
+            [InlineKeyboardButton("No, Continue", callback_data="back_home")],
         ]
     )
 
@@ -184,7 +217,7 @@ def configuration_keyboard(state: ConversationState) -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("🔄 Change report type", callback_data="choose_type")],
             [InlineKeyboardButton("📝 Change reason text", callback_data="change_text")],
-            [InlineKeyboardButton("#️⃣ Change total reports", callback_data="change_total")],
+            [InlineKeyboardButton("#️⃣ Change number of reports", callback_data="change_total")],
             [InlineKeyboardButton("⬅️ Back", callback_data="back_home")],
         ]
     )
@@ -253,7 +286,12 @@ def is_valid_group_link(link: str) -> bool:
     normalized = link.strip()
     if not normalized.startswith(("http://", "https://")):
         return False
-    return bool(re.match(r"^https?://t\.me/[A-Za-z0-9_+/-]+$", normalized))
+    patterns = [
+        r"^https?://t\.me/[A-Za-z0-9_]{3,}$",  # public username links
+        r"^https?://t\.me/\+[A-Za-z0-9_-]+$",  # join links with +
+        r"^https?://t\.me/joinchat/[A-Za-z0-9_-]+$",  # joinchat links
+    ]
+    return any(re.match(p, normalized) for p in patterns)
 
 
 def format_target_summary(state: ConversationState) -> str:
@@ -650,6 +688,10 @@ async def handle_run_command(client: Client, message) -> None:
         await message.reply_text("No session strings found to run validation")
         return
 
+    CONFIG["TARGET_GROUP_LINK"] = group_link
+    CONFIG["TARGET_MESSAGE_LINK"] = target_link
+    save_config(CONFIG)
+
     available_sessions = len(sessions)
 
     panel_lines = [
@@ -769,8 +811,11 @@ async def handle_set_reason(message) -> None:
         return
 
     CONFIG["REPORT_REASON"] = value
-    save_config(CONFIG)
     REPORT_REASON = reason_map[value]()
+    state = get_state(message.from_user.id)
+    state.report.report_reason_key = value
+    state.report.report_type = value.replace("_", " ").title()
+    persist_report_settings(state)
     await message.reply_text(f"✅ Report reason updated to `{value}`.")
 
 
@@ -786,15 +831,16 @@ async def handle_set_report_text(message) -> None:
         return
 
     REPORT_TEXT = parts[1].strip()
-    CONFIG["REPORT_TEXT"] = REPORT_TEXT
-    save_config(CONFIG)
+    state = get_state(message.from_user.id)
+    state.report.report_text = REPORT_TEXT
+    persist_report_settings(state)
     await message.reply_text("✅ Report text updated.")
 
 
 async def start_target_prompt(message, state: ConversationState) -> None:
     state.mode = "awaiting_group_link"
     await message.reply_text(
-        "Send the **group or channel link** to target (public @username or invite link).",
+        "Send the **group or channel link** to target (accepts https://t.me/username, https://t.me/+invite, or https://t.me/joinchat/invite).",
         reply_markup=InlineKeyboardMarkup(
             [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
         ),
@@ -818,6 +864,8 @@ async def confirm_target_and_configure(
             "Choose a report reason, provide the number of reports, or adjust text via the settings.",
             reply_markup=configuration_keyboard(state),
         )
+    state.report.session_limit = state.report.session_limit or state.target.active_sessions
+    persist_report_settings(state)
 
 
 async def handle_set_total_reports(message) -> None:
@@ -839,9 +887,9 @@ async def handle_set_total_reports(message) -> None:
     if total_reports < 0:
         await message.reply_text("❌ total_reports cannot be negative.")
         return
-
-    CONFIG["TOTAL_REPORTS"] = total_reports
-    save_config(CONFIG)
+    state = get_state(message.from_user.id)
+    state.report.report_total = total_reports
+    persist_report_settings(state)
     await message.reply_text(f"✅ Total reports set to {total_reports}.")
 
 
@@ -930,10 +978,17 @@ async def main():
             return
 
         state.mode = "idle"
-        state.target = TargetContext()
+        if not state.target.group_link:
+            state.target = TargetContext()
         state.report.report_text = CONFIG.get("REPORT_TEXT", "")
+        state.report.report_total = CONFIG.get("TOTAL_REPORTS")
+        state.report.report_type = CONFIG.get("REPORT_TYPE", "standard")
         await msg.reply_text(
-            "Welcome to the button-driven reporting system. Choose an action to begin.",
+            "Welcome to the guided reporting panel. Do you want to add new sessions before continuing?",
+            reply_markup=add_sessions_prompt_keyboard(),
+        )
+        await msg.reply_text(
+            "Use the buttons below to configure targets, report settings, or start reporting.",
             reply_markup=start_keyboard(),
         )
 
@@ -980,6 +1035,14 @@ async def main():
 
         state = get_state(cq.from_user.id)
         data = cq.data or ""
+
+        if data == "add_sessions_prompt":
+            await cq.message.reply_text(
+                "Do you want to add new sessions now?",
+                reply_markup=add_sessions_prompt_keyboard(),
+            )
+            await cq.answer()
+            return
 
         if data == "add_sessions":
             state.mode = "awaiting_session_name"
@@ -1035,9 +1098,8 @@ async def main():
             global REPORT_REASON
             state.report.report_reason_key = key
             state.report.report_type = key.replace("_", " ").title()
-            CONFIG["REPORT_REASON"] = key
-            save_config(CONFIG)
             REPORT_REASON = resolve_reason_class(key)
+            persist_report_settings(state)
             await cq.message.reply_text(
                 f"✅ Reason updated to {key}.", reply_markup=configuration_keyboard(state)
             )
@@ -1071,6 +1133,18 @@ async def main():
                 await cq.answer("Set a target first.", show_alert=True)
                 return
             state.report.session_limit = state.report.session_limit or state.target.active_sessions
+            await cq.message.reply_text("Re-validating target across sessions…")
+            target, notes = await validate_target_with_sessions(
+                state.target.group_link or "",
+                state.target.message_link or "",
+                state.report.session_limit,
+            )
+            if not target:
+                await cq.message.reply_text("\n".join(notes))
+                await cq.answer("Validation failed", show_alert=True)
+                return
+            state.target = target
+            persist_target(state)
             await cq.message.reply_text(
                 "Starting live reporting…", reply_markup=live_panel_keyboard()
             )
@@ -1189,6 +1263,7 @@ async def main():
                 state.mode = "idle"
                 return
             state.target = target
+            persist_target(state)
             state.mode = "confirmed"
             await confirm_target_and_configure(msg, state, notes)
             return
@@ -1197,9 +1272,8 @@ async def main():
         global REPORT_TEXT
         text = msg.text.strip()
         state.report.report_text = text
-        CONFIG["REPORT_TEXT"] = text
         REPORT_TEXT = text
-        save_config(CONFIG)
+        persist_report_settings(state)
         state.mode = "idle"
         await msg.reply_text(
             "✅ Report text updated.", reply_markup=configuration_keyboard(state)
@@ -1215,8 +1289,7 @@ async def main():
             await msg.reply_text("❌ Please send a non-negative integer.")
             return
         state.report.report_total = total
-        CONFIG["TOTAL_REPORTS"] = total
-        save_config(CONFIG)
+        persist_report_settings(state)
         state.mode = "idle"
         await msg.reply_text(
             f"✅ Total reports updated to {total}.",
