@@ -5,7 +5,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, utils
 from pyrogram.errors import (
     FloodWait,
     InviteHashExpired,
@@ -53,15 +53,13 @@ class ConversationState:
     live_panel: Optional[int] = None
     live_panel_chat: Optional[int] = None
     pending_session_name: Optional[str] = None
-    pending_sudo_action: Optional[str] = None
     last_panel_text: str = ""
 
 USER_STATES: Dict[int, ConversationState] = {}
 
 def load_config() -> Dict:
-    """Loads configuration with support for environment variables."""
     if not os.path.exists(CONFIG_PATH):
-        return {"API_ID": None, "API_HASH": "", "PRIMARY_SESSION": "", "LOG_GROUP_LINK": "", "OWNER_ID": None}
+        return {"API_ID": None, "API_HASH": "", "PRIMARY_SESSION": "", "OWNER_ID": None}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -71,17 +69,15 @@ def parse_int(value: Optional[Union[str, int]]) -> int:
     except (TypeError, ValueError):
         return 0
 
-# Load Globals: Priority Environment (Heroku) > config.json
 CONFIG = load_config()
 API_ID = parse_int(os.getenv("API_ID") or CONFIG.get("API_ID"))
 API_HASH = os.getenv("API_HASH") or CONFIG.get("API_HASH", "")
 OWNER_ID = parse_int(os.getenv("OWNER_ID") or CONFIG.get("OWNER_ID"))
 PRIMARY_SESSION = os.getenv("PRIMARY_SESSION") or CONFIG.get("PRIMARY_SESSION", "")
-LOG_GROUP_LINK = os.getenv("LOG_GROUP_LINK") or CONFIG.get("LOG_GROUP_LINK", "")
 
 def load_state() -> Dict:
     if not os.path.exists(STATE_PATH):
-        return {"target": {}, "report": {"reason": "other", "text": ""}, "log_group_id": None, "sudo_user_ids": []}
+        return {"target": {}, "report": {"reason": "other", "text": "Violating content"}, "sudo_user_ids": []}
     with open(STATE_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
 
@@ -92,10 +88,9 @@ def save_state(state: Dict) -> None:
         json.dump(state, f, indent=2)
 
 # ----------------------
-# Logic & Helper Functions
+# Logic & Fixed Peer Resolution
 # ----------------------
 
-# FIXED: Using types directly to avoid InputReportReason import error
 REASON_MAP = {
     "child_abuse": types.InputReportReasonChildAbuse,
     "violence": types.InputReportReasonViolence,
@@ -116,15 +111,27 @@ def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     if m_c: return int(f"-100{m_c.group(1)}"), int(m_c.group(2))
     return None, None
 
-def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
+async def force_resolve_peer(client: Client, chat_id: Union[str, int]):
+    """Attempts to resolve peer, joins if necessary to fix Peer ID Invalid error."""
+    try:
+        return await client.resolve_peer(chat_id)
+    except (KeyError, ValueError):
+        try:
+            # If it's a username or link, get_chat will cache it
+            chat = await client.get_chat(chat_id)
+            return await client.resolve_peer(chat.id)
+        except Exception:
+            return None
+
+def load_session_strings(limit: int = 0) -> List[Tuple[str, str]]:
     sessions = [("primary", PRIMARY_SESSION)]
     if os.path.isdir(SESSIONS_DIR):
         for filename in sorted(os.listdir(SESSIONS_DIR)):
-            path = os.path.join(SESSIONS_DIR, filename)
-            with open(path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-                if content: sessions.append((filename, content))
-    return sessions[:max_count] if max_count > 0 else sessions
+            if filename.endswith(".session"):
+                with open(os.path.join(SESSIONS_DIR, filename), "r") as f:
+                    content = f.read().strip()
+                    if content: sessions.append((filename, content))
+    return sessions[:limit] if limit > 0 else sessions
 
 async def run_reporting_flow(state: ConversationState, chat_id: int, client: Client):
     sessions = load_session_strings(state.report.session_limit)
@@ -141,37 +148,48 @@ async def run_reporting_flow(state: ConversationState, chat_id: int, client: Cli
         while state.paused: await asyncio.sleep(1)
         try:
             async with Client(name, API_ID, API_HASH, session_string=s_str, no_updates=True) as worker:
-                chat = await worker.join_chat(state.target.group_link)
-                peer = await worker.resolve_peer(chat.id)
-                await worker.invoke(functions.messages.Report(peer=peer, id=[state.target.message_id], 
-                                                              reason=reason_class, message=state.report.report_text))
-                success += 1
+                # First ensure we are in the chat
+                try:
+                    await worker.join_chat(state.target.group_link)
+                except UserAlreadyParticipant:
+                    pass
+                
+                peer = await force_resolve_peer(worker, state.target.chat_identifier)
+                if peer:
+                    await worker.invoke(functions.messages.Report(
+                        peer=peer, 
+                        id=[state.target.message_id], 
+                        reason=reason_class, 
+                        message=state.report.report_text
+                    ))
+                    success += 1
+                else: fail += 1
         except Exception: fail += 1
         
-        # Live Panel Update
+        # Dashboard Update
         try:
             status = "⏸ Paused" if state.paused else "▶️ Running"
             await client.edit_message_text(chat_id, panel.id, f"{header}\n\n✅ Success: {success}\n❌ Fail: {fail}\nStatus: {status}", 
                                           reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("▶️ Resume" if state.paused else "⏸ Pause", callback_data="toggle_pause")]]))
         except: pass
 
-    await client.send_message(chat_id, f"🏁 **Reporting Task Completed**\nSuccess: {success} | Failed: {fail}")
+    await client.send_message(chat_id, f"🏁 **Task Finished**\nSuccessful: {success} | Failed: {fail}")
 
 # ----------------------
-# Bot Handlers
+# Bot Event Handlers
 # ----------------------
 async def main():
     if not API_ID or not PRIMARY_SESSION:
-        print("CRITICAL: Missing API_ID or PRIMARY_SESSION in environment variables.")
+        print("CRITICAL: API_ID and PRIMARY_SESSION are required.")
         return
 
-    app = Client("minimal_reporter", api_id=API_ID, api_hash=API_HASH, session_string=PRIMARY_SESSION)
+    app = Client("moderator_tool", api_id=API_ID, api_hash=API_HASH, session_string=PRIMARY_SESSION)
 
     def get_state(uid) -> ConversationState:
         if uid not in USER_STATES:
             USER_STATES[uid] = ConversationState()
             USER_STATES[uid].report.report_reason_key = STATE_DATA["report"].get("reason", "other")
-            USER_STATES[uid].report.report_text = STATE_DATA["report"].get("text", "")
+            USER_STATES[uid].report.report_text = STATE_DATA["report"].get("text", "Spam content")
         return USER_STATES[uid]
 
     def is_auth(uid):
@@ -180,10 +198,12 @@ async def main():
     @app.on_message(filters.command("start") & filters.private)
     async def _start(_, msg):
         if not is_auth(msg.from_user.id): return
-        kb = [[InlineKeyboardButton("➕ Add Session", callback_data="add_sess"), InlineKeyboardButton("🎯 Set Target", callback_data="set_tar")],
-              [InlineKeyboardButton("⚙️ Settings", callback_data="config"), InlineKeyboardButton("🚀 Launch", callback_data="launch")],
-              [InlineKeyboardButton("🛡️ Sudo Management", callback_data="manage_sudo")]]
-        await msg.reply_text("🛰 **Moderator Tool Controller**\nGuided system active:", reply_markup=InlineKeyboardMarkup(kb))
+        kb = [
+            [InlineKeyboardButton("🎯 Set Target", callback_data="set_tar"), InlineKeyboardButton("🚀 Launch", callback_data="launch")],
+            [InlineKeyboardButton("➕ Add Session", callback_data="add_sess"), InlineKeyboardButton("🛡️ Manage Sudo", callback_data="manage_sudo")],
+            [InlineKeyboardButton("⚙️ Settings", callback_data="config")]
+        ]
+        await msg.reply_text("🛰 **Moderator Tool Controller**\nChoose an action:", reply_markup=InlineKeyboardMarkup(kb))
 
     @app.on_callback_query()
     async def _callbacks(client: Client, cq: CallbackQuery):
@@ -193,20 +213,31 @@ async def main():
 
         if cq.data == "set_tar":
             state.mode = "await_group"
-            await cq.edit_message_text("Step 1: Send the Group/Channel link:")
+            await cq.edit_message_text("1/2: Send the Group/Channel Invite Link:")
+        elif cq.data == "launch":
+            if not state.target.message_id: return await cq.answer("❌ Set target links first!", show_alert=True)
+            asyncio.create_task(run_reporting_flow(state, cq.message.chat.id, client))
         elif cq.data == "toggle_pause":
             state.paused = not state.paused
-            await cq.answer("Process " + ("Paused" if state.paused else "Resumed"))
-        elif cq.data == "launch":
-            if not state.target.message_id: return await cq.answer("❌ Set target first!", show_alert=True)
-            asyncio.create_task(run_reporting_flow(state, cq.message.chat.id, client))
+            await cq.answer("Paused" if state.paused else "Resumed")
         elif cq.data == "add_sess":
             state.mode = "await_sess_name"
-            await cq.edit_message_text("Enter name for this session file:")
+            await cq.edit_message_text("Enter name for this session file (e.g. acc1):")
         elif cq.data == "manage_sudo":
             if uid != OWNER_ID: return await cq.answer("Owner Only", show_alert=True)
             state.mode = "add_sudo"
-            await cq.edit_message_text(f"Current Sudos: `{STATE_DATA['sudo_user_ids']}`\n\nSend a User ID to add them:")
+            await cq.edit_message_text(f"Current Sudos: `{STATE_DATA['sudo_user_ids']}`\n\nSend a User ID to add to Sudo.")
+        elif cq.data == "config":
+            btns = [[InlineKeyboardButton(k, callback_data=f"rsn:{k}")] for k in REASON_MAP.keys()]
+            btns.append([InlineKeyboardButton("🔙 Back", callback_data="home")])
+            await cq.edit_message_text("Select Reporting Reason:", reply_markup=InlineKeyboardMarkup(btns))
+        elif cq.data.startswith("rsn:"):
+            state.report.report_reason_key = cq.data.split(":")[1]
+            STATE_DATA["report"]["reason"] = state.report.report_reason_key
+            save_state(STATE_DATA)
+            await cq.answer(f"Reason: {state.report.report_reason_key}")
+        elif cq.data == "home":
+            await _start(client, cq.message)
 
     @app.on_message(filters.private & ~filters.command("start"))
     async def _input(client: Client, msg):
@@ -217,23 +248,24 @@ async def main():
         if state.mode == "await_group":
             state.target.group_link = msg.text.strip()
             state.mode = "await_msg"
-            await msg.reply("Group saved. Now send the Message Link (https://t.me/c/xxx/yyy):")
+            await msg.reply("Group Link saved. Now send the Message Link:")
         elif state.mode == "await_msg":
             cid, mid = parse_link(msg.text.strip())
             if cid:
                 state.target.message_link, state.target.chat_identifier, state.target.message_id = msg.text.strip(), cid, mid
                 state.mode = "idle"
                 await msg.reply(f"✅ Target Locked: {cid} / {mid}")
-            else: await msg.reply("❌ Invalid format.")
+            else: await msg.reply("❌ Invalid format. Use https://t.me/c/xxx/yyy")
         elif state.mode == "await_sess_name":
             state.pending_session_name = msg.text.strip()
             state.mode = "await_sess_val"
-            await msg.reply(f"Paste the session string for `{state.pending_session_name}`:")
+            await msg.reply("Paste the session string:")
         elif state.mode == "await_sess_val":
             os.makedirs(SESSIONS_DIR, exist_ok=True)
-            with open(os.path.join(SESSIONS_DIR, f"{state.pending_session_name}.session"), "w") as f: f.write(msg.text.strip())
+            with open(os.path.join(SESSIONS_DIR, f"{state.pending_session_name}.session"), "w") as f:
+                f.write(msg.text.strip())
             state.mode = "idle"
-            await msg.reply(f"✅ Session `{state.pending_session_name}` added.")
+            await msg.reply(f"✅ Session `{state.pending_session_name}` saved.")
         elif state.mode == "add_sudo":
             try:
                 sid = int(msg.text.strip())
@@ -242,9 +274,9 @@ async def main():
                     save_state(STATE_DATA)
                 await msg.reply(f"✅ Added {sid} to Sudo.")
                 state.mode = "idle"
-            except: await msg.reply("Invalid ID format.")
+            except: await msg.reply("Send a numeric ID.")
 
-    print("--- Bot Initialized Successfully ---")
+    print("--- Moderator Bot Starting ---")
     await app.start()
     await asyncio.Event().wait()
 
@@ -253,4 +285,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
