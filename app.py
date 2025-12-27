@@ -24,6 +24,48 @@ CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
 SESSIONS_DIR = "sessions"
 
+# ---- Pyrogram crash-guard for large channel peer IDs (prevents ValueError: Peer id invalid: -10027...)
+try:
+    from pyrogram import utils as _pyro_utils  # type: ignore
+
+    _ORIG_GET_PEER_TYPE = _pyro_utils.get_peer_type
+    _MIN_CHANNEL_PEER = -1002147483648  # Pyrogram historically capped here (int32 channel_id)
+
+    def _patched_get_peer_type(peer_id: Any) -> Any:
+        if isinstance(peer_id, int) and peer_id <= -1000000000000 and peer_id < _MIN_CHANNEL_PEER:
+            return "channel"
+        return _ORIG_GET_PEER_TYPE(peer_id)
+
+    _pyro_utils.get_peer_type = _patched_get_peer_type  # type: ignore[attr-defined]
+except Exception:
+    pass
+
+
+async def safe_reply_text(message, text: str, **kwargs) -> Optional[object]:
+    try:
+        return await message.reply_text(text, **kwargs)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        try:
+            return await message.reply_text(text, **kwargs)
+        except RPCError:
+            return None
+    except RPCError:
+        return None
+
+
+async def safe_answer(cq: CallbackQuery, text: str = "", **kwargs) -> None:
+    try:
+        await cq.answer(text, **kwargs)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        try:
+            await cq.answer(text, **kwargs)
+        except RPCError:
+            return
+    except RPCError:
+        return
+
 
 @dataclass
 class TargetContext:
@@ -306,10 +348,8 @@ def configuration_keyboard(state: ConversationState) -> InlineKeyboardMarkup:
 def reason_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row: List[InlineKeyboardButton] = []
-    for idx, key in enumerate(REASON_MAP.keys()):
-        row.append(
-            InlineKeyboardButton(key.replace("_", " ").title(), callback_data=f"reason:{key}")
-        )
+    for key in REASON_MAP.keys():
+        row.append(InlineKeyboardButton(key.replace("_", " ").title(), callback_data=f"reason:{key}"))
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -377,7 +417,7 @@ def is_valid_group_link(link: str) -> bool:
 
 
 async def resolve_user_identifier(app: Client, message) -> Tuple[Optional[int], str]:
-    if message.forward_from:
+    if getattr(message, "forward_from", None):
         return message.forward_from.id, "Forwarded user detected."
 
     if message.text:
@@ -481,6 +521,7 @@ async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int]
     state.last_panel_text = header
     state.live_panel = sent_id
     state.live_panel_chat = panel_chat
+
     success = 0
     failed = 0
     details: List[str] = []
@@ -595,13 +636,23 @@ async def send_log_message(
             return None
         msg = await client.send_message(target_chat, text, reply_markup=reply_markup)
         return msg.id
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        try:
+            target_chat = chat_id or await resolve_log_group_id(client)
+            if target_chat is None:
+                return None
+            msg = await client.send_message(target_chat, text, reply_markup=reply_markup)
+            return msg.id
+        except RPCError:
+            return None
     except RPCError:
         return None
 
 
 async def edit_log_message(
     client: Client,
-    chat_id: int,
+    chat_id: Optional[int],
     message_id: int,
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
@@ -611,8 +662,17 @@ async def edit_log_message(
         if target_chat is None:
             return
         await client.edit_message_text(target_chat, message_id, text, reply_markup=reply_markup)
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        try:
+            target_chat = chat_id or await resolve_log_group_id(client)
+            if target_chat is None:
+                return
+            await client.edit_message_text(target_chat, message_id, text, reply_markup=reply_markup)
+        except RPCError:
+            return
     except RPCError:
-        pass
+        return
 
 
 async def join_target_chat(
@@ -634,14 +694,14 @@ async def join_target_chat(
         try:
             peer = await client.resolve_peer(chat_identifier)
             return peer, "ℹ️ Already a participant"
-        except RPCError as e:  # pragma: no cover
-            return None, f"⚠️ Could not confirm membership: {e.MESSAGE or e}"  # type: ignore[attr-defined]
+        except RPCError as e:
+            return None, f"⚠️ Could not confirm membership: {getattr(e, 'MESSAGE', None) or e}"
     except (InviteHashExpired, InviteHashInvalid):
         return None, "❌ Invite link expired or invalid"
     except (UsernameInvalid, UsernameNotOccupied):
         return None, "❌ Invalid or unknown public group/channel link"
     except RPCError as e:
-        return None, f"❌ Failed to join: {e.MESSAGE or e}"  # type: ignore[attr-defined]
+        return None, f"❌ Failed to join: {getattr(e, 'MESSAGE', None) or e}"
 
 
 async def evaluate_session(
@@ -671,7 +731,7 @@ async def evaluate_session(
                 try:
                     msg = await user_client.get_messages(target, message_id)
                 except RPCError as e:
-                    return "inaccessible", f"Message error: {e.MESSAGE or e}"  # type: ignore[attr-defined]
+                    return "inaccessible", f"Message error: {getattr(e, 'MESSAGE', None) or e}"
 
                 await user_client.invoke(
                     functions.messages.Report(
@@ -686,12 +746,12 @@ async def evaluate_session(
                 await asyncio.sleep(e.value)
                 return "floodwait", f"FloodWait {e.value}s"
             except RPCError as e:
-                return "inaccessible", f"RPC error: {e.MESSAGE or e}"  # type: ignore[attr-defined]
+                return "inaccessible", f"RPC error: {getattr(e, 'MESSAGE', None) or e}"
     except RPCError as e:
         if isinstance(e, FloodWait):
             await asyncio.sleep(e.value)
             return "floodwait", f"FloodWait {e.value}s"
-        return "invalid", f"Session error: {e.MESSAGE or e}"  # type: ignore[attr-defined]
+        return "invalid", f"Session error: {getattr(e, 'MESSAGE', None) or e}"
     except Exception as e:  # noqa: BLE001
         return "invalid", f"Unexpected: {e}"
 
@@ -703,7 +763,6 @@ async def validate_session_access(
     target: Union[str, int],
     message_id: int,
 ) -> Tuple[str, str, Optional[str], Optional[str]]:
-    """Join and fetch the message without reporting to confirm accessibility."""
     try:
         async with Client(
             name=f"validate_{session_name}",
@@ -719,29 +778,45 @@ async def validate_session_access(
                 msg = await user_client.get_messages(target, message_id)
                 preview = (msg.text or msg.caption or "").strip()
                 preview = preview[:120] + ("…" if len(preview) > 120 else "") if preview else None
-                return "reachable", f"{join_detail}", msg.chat.title or msg.chat.first_name, preview
+                title = None
+                try:
+                    title = msg.chat.title or msg.chat.first_name
+                except Exception:
+                    title = None
+                return "reachable", f"{join_detail}", title, preview
             except RPCError as e:
-                return "inaccessible", f"Message error: {e.MESSAGE or e}", None, None  # type: ignore[attr-defined]
+                return "inaccessible", f"Message error: {getattr(e, 'MESSAGE', None) or e}", None, None
     except UserAlreadyParticipant:
         return "reachable", "Already joined", None, None
     except FloodWait as e:
         await asyncio.sleep(e.value)
         return "floodwait", f"FloodWait {e.value}s", None, None
     except RPCError as e:
-        return "invalid", f"RPC error: {e.MESSAGE or e}", None, None  # type: ignore[attr-defined]
+        return "invalid", f"RPC error: {getattr(e, 'MESSAGE', None) or e}", None, None
     except Exception as e:  # noqa: BLE001
         return "invalid", f"Unexpected: {e}", None, None
 
 
+def is_owner(user_id: Optional[int]) -> bool:
+    return user_id is not None and OWNER_ID is not None and user_id == OWNER_ID
+
+
+def is_sudo(user_id: Optional[int]) -> bool:
+    return user_id is not None and user_id in STATE_DATA.get("sudo_user_ids", [])
+
+
+def has_power(user_id: Optional[int]) -> bool:
+    return is_owner(user_id) or is_sudo(user_id)
+
+
 async def handle_run_command(client: Client, message) -> None:
-    global OWNER_ID
     if OWNER_ID is None or not has_power(message.from_user.id if message.from_user else None):
-        await message.reply_text("❌ Authorization failed. Only owner or sudo users can run this command.")
+        await safe_reply_text(message, "❌ Authorization failed. Only owner or sudo users can run this command.")
         return
 
-    parts = message.text.split()
+    parts = (message.text or "").split()
     if len(parts) != 5:
-        await message.reply_text("Usage: /run <group_link> <message_link> <sessions_count> <requested_count>")
+        await safe_reply_text(message, "Usage: /run <group_link> <message_link> <sessions_count> <requested_count>")
         return
 
     _, group_link, target_link, sessions_count_raw, requested_count_raw = parts
@@ -749,36 +824,37 @@ async def handle_run_command(client: Client, message) -> None:
     try:
         sessions_count = int(sessions_count_raw)
     except ValueError:
-        await message.reply_text("sessions_count must be an integer between 1 and 100")
+        await safe_reply_text(message, "sessions_count must be an integer between 1 and 100")
         return
 
     try:
         requested_count = int(requested_count_raw)
     except ValueError:
-        await message.reply_text("requested_count must be an integer between 1 and 500")
+        await safe_reply_text(message, "requested_count must be an integer between 1 and 500")
         return
 
     if not 1 <= sessions_count <= 100:
-        await message.reply_text("sessions_count must be between 1 and 100")
+        await safe_reply_text(message, "sessions_count must be between 1 and 100")
         return
     if not 1 <= requested_count <= 500:
-        await message.reply_text("requested_count must be between 1 and 500")
+        await safe_reply_text(message, "requested_count must be between 1 and 500")
         return
 
     if not group_link.startswith(("http://", "https://")):
-        await message.reply_text("❌ group_link must start with http:// or https://")
+        await safe_reply_text(message, "❌ group_link must start with http:// or https://")
         return
 
     chat_identifier, msg_id = parse_link(target_link)
     if chat_identifier is None or msg_id is None:
-        await message.reply_text(
-            "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>"
+        await safe_reply_text(
+            message,
+            "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>",
         )
         return
 
     sessions = load_session_strings(sessions_count)
     if not sessions:
-        await message.reply_text("No session strings found to run validation")
+        await safe_reply_text(message, "No session strings found to run validation")
         return
 
     state = get_state(message.from_user.id)
@@ -790,23 +866,25 @@ async def handle_run_command(client: Client, message) -> None:
 
     available_sessions = len(sessions)
 
-    panel_lines = [
-        "🛰️ **Review Panel Initialized**",
-        f"Target group/channel: {group_link}",
-        f"Target message: {target_link}",
-        f"Chat reference: {chat_identifier}",
-        f"Message ID: {msg_id}",
-        f"Requested sessions: {sessions_count}",
-        f"Requested count: {requested_count}",
-        f"Available sessions: {available_sessions}",
-        f"Configured total reports: {state.report.report_total or '—'}",
-        f"Report reason: {state.report.report_reason_key or 'other'}",
-        f"Report text: {state.report.report_text or 'Not set'}",
-    ]
-    panel_lines.append("Status: processing…")
-    panel_text = "\n".join(panel_lines)
+    panel_text = "\n".join(
+        [
+            "🛰️ **Review Panel Initialized**",
+            f"Target group/channel: {group_link}",
+            f"Target message: {target_link}",
+            f"Chat reference: {chat_identifier}",
+            f"Message ID: {msg_id}",
+            f"Requested sessions: {sessions_count}",
+            f"Requested count: {requested_count}",
+            f"Available sessions: {available_sessions}",
+            f"Configured total reports: {state.report.report_total or '—'}",
+            f"Report reason: {state.report.report_reason_key or 'other'}",
+            f"Report text: {state.report.report_text or 'Not set'}",
+            "Status: processing…",
+        ]
+    )
+
     panel_chat = message.chat.id if message.chat else STATE_DATA.get("log_group_id")
-    panel_id = await send_log_message(client, panel_chat or message.chat.id, panel_text)
+    panel_id = await send_log_message(client, panel_chat or (message.chat.id if message.chat else None), panel_text)
 
     results: List[str] = []
     reachable = 0
@@ -836,158 +914,104 @@ async def handle_run_command(client: Client, message) -> None:
             f"• Reachable: {reachable}/{processed}\n\n"
             "\n".join(results)
         )
-        if panel_id:
+        if panel_id and panel_chat is not None:
             await edit_log_message(client, panel_chat, panel_id, panel_text)
 
-    await message.reply_text("✅ Run completed. Check the review panel for details.")
+    await safe_reply_text(message, "✅ Run completed. Check the review panel for details.")
 
 
 async def handle_set_owner(client: Client, message) -> None:
-    await message.reply_text(f"🔒 Owner is locked to `{OWNER_ID}` and cannot be changed after deployment.")
-
-
-def is_owner(user_id: Optional[int]) -> bool:
-    return user_id is not None and OWNER_ID is not None and user_id == OWNER_ID
-
-
-def is_sudo(user_id: Optional[int]) -> bool:
-    return user_id is not None and user_id in STATE_DATA.get("sudo_user_ids", [])
-
-
-def has_power(user_id: Optional[int]) -> bool:
-    return is_owner(user_id) or is_sudo(user_id)
-
-
-def owner_required(message) -> bool:
-    return bool(message.from_user and is_owner(message.from_user.id))
+    await safe_reply_text(message, f"🔒 Owner is locked to `{OWNER_ID}` and cannot be changed after deployment.")
 
 
 async def handle_set_reason(message) -> None:
     global REPORT_REASON
     if not has_power(message.from_user.id if message.from_user else None):
-        await message.reply_text("❌ Only the owner or sudo users can update the report reason.")
+        await safe_reply_text(message, "❌ Only the owner or sudo users can update the report reason.")
         return
 
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        await message.reply_text(
-            "Usage: /set_reason <child_abuse|violence|illegal_goods|illegal_adult|personal_data|scam|copyright|spam|other>"
+        await safe_reply_text(
+            message,
+            "Usage: /set_reason <child_abuse|violence|illegal_goods|illegal_adult|personal_data|scam|copyright|spam|other>",
         )
         return
 
     value = parts[1].strip().lower()
-    reason_map = {
-        "child_abuse": types.InputReportReasonChildAbuse,
-        "violence": types.InputReportReasonViolence,
-        "illegal_goods": types.InputReportReasonIllegalDrugs,
-        "illegal_adult": types.InputReportReasonPornography,
-        "personal_data": types.InputReportReasonPersonalDetails,
-        "scam": types.InputReportReasonSpam,
-        "copyright": types.InputReportReasonCopyright,
-        "spam": types.InputReportReasonSpam,
-        "other": types.InputReportReasonOther,
-    }
-
-    if value not in reason_map:
-        await message.reply_text(
-            "❌ Invalid reason. Choose one of: child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other."
+    if value not in REASON_MAP:
+        await safe_reply_text(
+            message,
+            "❌ Invalid reason. Choose one of: child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other.",
         )
         return
 
-    REPORT_REASON = reason_map[value]()
+    REPORT_REASON = resolve_reason_class(value)
     state = get_state(message.from_user.id)
     state.report.report_reason_key = value
     state.report.report_type = value.replace("_", " ").title()
     persist_report_settings(state)
-    await message.reply_text(f"✅ Report reason updated to `{value}`.")
+    await safe_reply_text(message, f"✅ Report reason updated to `{value}`.")
 
 
 async def handle_set_report_text(message) -> None:
     global REPORT_TEXT
     if not has_power(message.from_user.id if message.from_user else None):
-        await message.reply_text("❌ Only the owner or sudo users can update the report text.")
+        await safe_reply_text(message, "❌ Only the owner or sudo users can update the report text.")
         return
 
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2 or not parts[1].strip():
-        await message.reply_text("Usage: /set_report_text <text>")
+        await safe_reply_text(message, "Usage: /set_report_text <text>")
         return
 
     REPORT_TEXT = parts[1].strip()
     state = get_state(message.from_user.id)
     state.report.report_text = REPORT_TEXT
     persist_report_settings(state)
-    await message.reply_text("✅ Report text updated.")
-
-
-async def start_target_prompt(message, state: ConversationState) -> None:
-    state.mode = "awaiting_group_link"
-    await message.reply_text(
-        "Send the **group or channel link** to target (accepts https://t.me/username, https://t.me/+invite, or https://t.me/joinchat/invite).",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
-    )
-
-
-async def confirm_target_and_configure(message, state: ConversationState, validation_notes: List[str]) -> None:
-    summary = format_target_summary(state)
-    summary += "\n\n" + "\n".join(validation_notes)
-    await message.reply_text(summary, reply_markup=target_keyboard())
-    if state.report.report_total is None:
-        state.mode = "awaiting_report_total"
-        await message.reply_text(
-            "How many reports should be sent? Reply with a number, then fine-tune the reason via buttons.",
-            reply_markup=configuration_keyboard(state),
-        )
-    else:
-        await message.reply_text(
-            "Choose a report reason, provide the number of reports, or adjust text via the settings.",
-            reply_markup=configuration_keyboard(state),
-        )
-    state.report.session_limit = state.report.session_limit or state.target.active_sessions
-    persist_report_settings(state)
+    await safe_reply_text(message, "✅ Report text updated.")
 
 
 async def handle_set_total_reports(message) -> None:
     if not has_power(message.from_user.id if message.from_user else None):
-        await message.reply_text("❌ Only the owner or sudo users can update the total reports.")
+        await safe_reply_text(message, "❌ Only the owner or sudo users can update the total reports.")
         return
 
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        await message.reply_text("Usage: /set_total_reports <count>")
+        await safe_reply_text(message, "Usage: /set_total_reports <count>")
         return
 
     try:
         total_reports = int(parts[1])
     except ValueError:
-        await message.reply_text("❌ total_reports must be an integer.")
+        await safe_reply_text(message, "❌ total_reports must be an integer.")
         return
 
     if total_reports < 0:
-        await message.reply_text("❌ total_reports cannot be negative.")
+        await safe_reply_text(message, "❌ total_reports cannot be negative.")
         return
 
     state = get_state(message.from_user.id)
     state.report.report_total = total_reports
     persist_report_settings(state)
-    await message.reply_text(f"✅ Total reports set to {total_reports}.")
+    await safe_reply_text(message, f"✅ Total reports set to {total_reports}.")
 
 
 async def handle_set_links(message) -> None:
     global LOG_GROUP_LINK
     if not has_power(message.from_user.id if message.from_user else None):
-        await message.reply_text("❌ Only the owner or sudo users can update links.")
+        await safe_reply_text(message, "❌ Only the owner or sudo users can update links.")
         return
 
-    parts = message.text.split(maxsplit=1)
+    parts = (message.text or "").split(maxsplit=1)
     if len(parts) != 2:
-        await message.reply_text("Usage: /set_links <log_group_link>")
+        await safe_reply_text(message, "Usage: /set_links <log_group_link>")
         return
 
     log_group_link = parts[1].strip()
-
-    if not (log_group_link.startswith("http://") or log_group_link.startswith("https://")):
-        await message.reply_text("❌ log_group_link must start with http:// or https://")
+    if not log_group_link.startswith(("http://", "https://")):
+        await safe_reply_text(message, "❌ log_group_link must start with http:// or https://")
         return
 
     LOG_GROUP_LINK = log_group_link
@@ -995,30 +1019,31 @@ async def handle_set_links(message) -> None:
     save_config(CONFIG)
     STATE_DATA["log_group_id"] = None
     save_state(STATE_DATA)
-    await message.reply_text("✅ Log group link updated. Future panels will use the new group.")
+    await safe_reply_text(message, "✅ Log group link updated. Future panels will use the new group.")
 
 
 async def handle_add_session(message) -> None:
     if not has_power(message.from_user.id if message.from_user else None):
-        await message.reply_text("❌ Only the owner or sudo users can add sessions.")
+        await safe_reply_text(message, "❌ Only the owner or sudo users can add sessions.")
         return
 
-    parts = message.text.split(maxsplit=2)
+    parts = (message.text or "").split(maxsplit=2)
     if len(parts) != 3:
-        await message.reply_text("Usage: /add_session <name> <session_string>")
+        await safe_reply_text(message, "Usage: /add_session <name> <session_string>")
         return
 
     name = parts[1].strip()
     session_str = parts[2].strip()
 
     if not name or not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
-        await message.reply_text(
-            "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens)."
+        await safe_reply_text(
+            message,
+            "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens).",
         )
         return
 
     if len(session_str) < 10:
-        await message.reply_text("❌ Session string looks too short. Please provide a valid session string.")
+        await safe_reply_text(message, "❌ Session string looks too short. Please provide a valid session string.")
         return
 
     os.makedirs(SESSIONS_DIR, exist_ok=True)
@@ -1026,7 +1051,36 @@ async def handle_add_session(message) -> None:
     with open(dest, "w", encoding="utf-8") as f:
         f.write(session_str)
 
-    await message.reply_text(f"✅ Session `{name}` added. It will be used on the next /run.")
+    await safe_reply_text(message, f"✅ Session `{name}` added. It will be used on the next /run.")
+
+
+async def start_target_prompt(message, state: ConversationState) -> None:
+    state.mode = "awaiting_group_link"
+    await safe_reply_text(
+        message,
+        "Send the **group or channel link** to target (accepts https://t.me/username, https://t.me/+invite, or https://t.me/joinchat/invite).",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
+    )
+
+
+async def confirm_target_and_configure(message, state: ConversationState, validation_notes: List[str]) -> None:
+    summary = format_target_summary(state) + "\n\n" + "\n".join(validation_notes)
+    await safe_reply_text(message, summary, reply_markup=target_keyboard())
+    if state.report.report_total is None:
+        state.mode = "awaiting_report_total"
+        await safe_reply_text(
+            message,
+            "How many reports should be sent? Reply with a number, then fine-tune the reason via buttons.",
+            reply_markup=configuration_keyboard(state),
+        )
+    else:
+        await safe_reply_text(
+            message,
+            "Choose a report reason, provide the number of reports, or adjust text via the settings.",
+            reply_markup=configuration_keyboard(state),
+        )
+    state.report.session_limit = state.report.session_limit or state.target.active_sessions
+    persist_report_settings(state)
 
 
 async def main():
@@ -1040,12 +1094,12 @@ async def main():
     @app.on_message(filters.command("start"))
     async def _start(_, msg):
         if not msg.from_user:
-            await msg.reply_text("⚠️ Start is available only from owner/sudo private chats or the log group.")
+            await safe_reply_text(msg, "⚠️ Start is available only from owner/sudo private chats or the log group.")
             return
 
         state = get_state(msg.from_user.id)
         if not has_power(msg.from_user.id):
-            await msg.reply_text("❌ Only the owner or configured sudo users can control this bot.")
+            await safe_reply_text(msg, "❌ Only the owner or configured sudo users can control this bot.")
             return
 
         state.mode = "idle"
@@ -1055,18 +1109,21 @@ async def main():
         state.report.report_text = STATE_DATA["report"].get("text", "")
         state.report.report_total = STATE_DATA["report"].get("total")
         state.report.report_type = STATE_DATA["report"].get("type", "standard")
-        await msg.reply_text(
+
+        await safe_reply_text(
+            msg,
             "Do you want to add new sessions? Use the buttons to continue the guided setup.",
             reply_markup=add_sessions_prompt_keyboard(),
         )
-        await msg.reply_text(
+        await safe_reply_text(
+            msg,
             "Main control panel ready. Follow the buttons to set targets, configure reports, or launch the live panel.",
             reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
         )
 
     @app.on_message(filters.command("help"))
     async def _help(_, msg):
-        await msg.reply_text(format_help())
+        await safe_reply_text(msg, format_help())
 
     @app.on_message(filters.command("set_owner"))
     async def _set_owner(client, msg):
@@ -1099,10 +1156,10 @@ async def main():
     @app.on_callback_query()
     async def _callbacks(client: Client, cq: CallbackQuery):
         if OWNER_ID is None:
-            await cq.answer("Set OWNER_ID first via config.json.", show_alert=True)
+            await safe_answer(cq, "Set OWNER_ID first via config.json.", show_alert=True)
             return
         if not cq.from_user or not has_power(cq.from_user.id):
-            await cq.answer("Only the owner or sudo users can use these controls.", show_alert=True)
+            await safe_answer(cq, "Only the owner or sudo users can use these controls.", show_alert=True)
             return
 
         state = get_state(cq.from_user.id)
@@ -1110,95 +1167,99 @@ async def main():
 
         if data == "manage_sudo":
             if not is_owner(cq.from_user.id):
-                await cq.answer("Only the owner can manage sudo users.", show_alert=True)
+                await safe_answer(cq, "Only the owner can manage sudo users.", show_alert=True)
                 return
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Owner panel: manage sudo users post-deployment.",
                 reply_markup=sudo_management_keyboard(),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "sudo_add":
             if not is_owner(cq.from_user.id):
-                await cq.answer("Only the owner can add sudo users.", show_alert=True)
+                await safe_answer(cq, "Only the owner can add sudo users.", show_alert=True)
                 return
             state.mode = "awaiting_sudo_add"
             state.pending_sudo_action = "add"
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Send the sudo user as an ID, @username, or forward a message from them.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "sudo_remove":
             if not is_owner(cq.from_user.id):
-                await cq.answer("Only the owner can remove sudo users.", show_alert=True)
+                await safe_answer(cq, "Only the owner can remove sudo users.", show_alert=True)
                 return
             sudo_ids = STATE_DATA.get("sudo_user_ids", [])
             if not sudo_ids:
-                await cq.message.reply_text("No sudo users configured.")
-                await cq.answer()
+                await safe_reply_text(cq.message, "No sudo users configured.")
+                await safe_answer(cq)
                 return
             rows = [[InlineKeyboardButton(str(uid), callback_data=f"sudo_remove:{uid}")] for uid in sudo_ids]
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data="manage_sudo")])
-            await cq.message.reply_text("Select a sudo user to remove.", reply_markup=InlineKeyboardMarkup(rows))
-            await cq.answer()
+            await safe_reply_text(cq.message, "Select a sudo user to remove.", reply_markup=InlineKeyboardMarkup(rows))
+            await safe_answer(cq)
             return
 
         if data == "sudo_list":
             if not is_owner(cq.from_user.id):
-                await cq.answer("Only the owner can view sudo roster.", show_alert=True)
+                await safe_answer(cq, "Only the owner can view sudo roster.", show_alert=True)
                 return
             sudo_ids = STATE_DATA.get("sudo_user_ids", [])
             if not sudo_ids:
-                await cq.message.reply_text("No sudo users configured.")
+                await safe_reply_text(cq.message, "No sudo users configured.")
             else:
-                await cq.message.reply_text("Current sudo users:\n" + "\n".join(f"• {uid}" for uid in sudo_ids))
-            await cq.answer()
+                await safe_reply_text(cq.message, "Current sudo users:\n" + "\n".join(f"• {uid}" for uid in sudo_ids))
+            await safe_answer(cq)
             return
 
         if data.startswith("sudo_remove:"):
             if not is_owner(cq.from_user.id):
-                await cq.answer("Only the owner can remove sudo users.", show_alert=True)
+                await safe_answer(cq, "Only the owner can remove sudo users.", show_alert=True)
                 return
             _, raw_id = data.split(":", 1)
             try:
                 remove_id = int(raw_id)
             except ValueError:
-                await cq.answer("Invalid user id", show_alert=True)
+                await safe_answer(cq, "Invalid user id", show_alert=True)
                 return
             sudo_ids = STATE_DATA.get("sudo_user_ids", [])
             if remove_id in sudo_ids:
                 sudo_ids.remove(remove_id)
                 persist_sudo_users(sudo_ids)
-                await cq.message.reply_text(
+                await safe_reply_text(
+                    cq.message,
                     f"Removed sudo access for `{remove_id}`.",
                     reply_markup=sudo_management_keyboard(),
                 )
             else:
-                await cq.message.reply_text("User not in sudo list.")
-            await cq.answer()
+                await safe_reply_text(cq.message, "User not in sudo list.")
+            await safe_answer(cq)
             return
 
         if data == "add_sessions_prompt":
-            await cq.message.reply_text("Do you want to add new sessions now?", reply_markup=add_sessions_prompt_keyboard())
-            await cq.answer()
+            await safe_reply_text(cq.message, "Do you want to add new sessions now?", reply_markup=add_sessions_prompt_keyboard())
+            await safe_answer(cq)
             return
 
         if data == "add_sessions":
             state.mode = "awaiting_session_name"
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Send a session name (letters/numbers/underscore). After that, send the session string.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "setup_target":
             await start_target_prompt(cq.message, state)
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "configure":
@@ -1209,31 +1270,33 @@ async def main():
                 f"Report text: {state.report.report_text or 'Not set'}\n"
                 f"Total reports: {state.report.report_total or 'Not set'}"
             )
-            await cq.message.reply_text(text, reply_markup=configuration_keyboard(state))
-            await cq.answer()
+            await safe_reply_text(cq.message, text, reply_markup=configuration_keyboard(state))
+            await safe_answer(cq)
             return
 
         if data == "show_help":
-            await cq.message.reply_text(format_help())
-            await cq.answer()
+            await safe_reply_text(cq.message, format_help())
+            await safe_answer(cq)
             return
 
         if data == "back_home":
             state.mode = "idle"
             state.pending_sudo_action = None
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Back to home. Choose what to do next.",
                 reply_markup=start_keyboard(is_owner=is_owner(cq.from_user.id)),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "choose_type":
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Select a report reason (applies to new reports immediately).",
                 reply_markup=reason_keyboard(),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data.startswith("reason:"):
@@ -1243,46 +1306,48 @@ async def main():
             state.report.report_type = key.replace("_", " ").title()
             REPORT_REASON = resolve_reason_class(key)
             persist_report_settings(state)
-            await cq.message.reply_text(f"✅ Reason updated to {key}.", reply_markup=configuration_keyboard(state))
-            await cq.answer("Reason updated")
+            await safe_reply_text(cq.message, f"✅ Reason updated to {key}.", reply_markup=configuration_keyboard(state))
+            await safe_answer(cq, "Reason updated")
             return
 
         if data == "change_text":
             state.mode = "awaiting_report_text"
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Send the new report text/message body.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "change_total":
             state.mode = "awaiting_report_total"
-            await cq.message.reply_text(
+            await safe_reply_text(
+                cq.message,
                 "Send the new total number of reports to log (integer).",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "begin_report":
             if not state.target.message_id:
-                await cq.answer("Set a target first.", show_alert=True)
+                await safe_answer(cq, "Set a target first.", show_alert=True)
                 return
             state.report.session_limit = state.report.session_limit or state.target.active_sessions
-            await cq.message.reply_text("Re-validating target across sessions…")
+            await safe_reply_text(cq.message, "Re-validating target across sessions…")
             target, notes = await validate_target_with_sessions(
                 state.target.group_link or "",
                 state.target.message_link or "",
                 state.report.session_limit,
             )
             if not target:
-                await cq.message.reply_text("\n".join(notes))
-                await cq.answer("Validation failed", show_alert=True)
+                await safe_reply_text(cq.message, "\n".join(notes))
+                await safe_answer(cq, "Validation failed", show_alert=True)
                 return
             state.target = target
             persist_target(state)
-            await cq.message.reply_text("Starting live reporting…", reply_markup=live_panel_keyboard())
+            await safe_reply_text(cq.message, "Starting live reporting…", reply_markup=live_panel_keyboard())
             asyncio.create_task(
                 run_reporting_flow(
                     state,
@@ -1290,12 +1355,12 @@ async def main():
                     client,
                 )
             )
-            await cq.answer()
+            await safe_answer(cq)
             return
 
         if data == "toggle_pause":
             state.paused = not state.paused
-            await cq.answer("Paused" if state.paused else "Resumed")
+            await safe_answer(cq, "Paused" if state.paused else "Resumed")
             if state.live_panel and state.live_panel_chat:
                 text = state.last_panel_text or "🛰️ Live Reporting Panel"
                 status_line = f"\nStatus: {'Paused' if state.paused else 'Running'}"
@@ -1306,6 +1371,9 @@ async def main():
                     text + status_line,
                     reply_markup=live_panel_keyboard(state.paused),
                 )
+            return
+
+        await safe_answer(cq)
 
     @app.on_message(
         ~filters.command(
@@ -1326,10 +1394,10 @@ async def main():
         if not msg.from_user:
             return
         if OWNER_ID is None:
-            await msg.reply_text("Set OWNER_ID first in config.json.")
+            await safe_reply_text(msg, "Set OWNER_ID first in config.json.")
             return
         if not has_power(msg.from_user.id):
-            await msg.reply_text("❌ Only the owner or sudo users can control this bot.")
+            await safe_reply_text(msg, "❌ Only the owner or sudo users can control this bot.")
             return
 
         state = get_state(msg.from_user.id)
@@ -1338,24 +1406,25 @@ async def main():
             if not is_owner(msg.from_user.id):
                 state.mode = "idle"
                 state.pending_sudo_action = None
-                await msg.reply_text("Only the owner can manage sudo users.")
+                await safe_reply_text(msg, "Only the owner can manage sudo users.")
                 return
             user_id, detail = await resolve_user_identifier(app, msg)
             if not user_id:
-                await msg.reply_text(f"❌ {detail}")
+                await safe_reply_text(msg, f"❌ {detail}")
                 return
             if user_id == OWNER_ID:
-                await msg.reply_text("Owner is already fully privileged and cannot be demoted.")
+                await safe_reply_text(msg, "Owner is already fully privileged and cannot be demoted.")
                 state.mode = "idle"
                 state.pending_sudo_action = None
                 return
             sudo_ids = STATE_DATA.get("sudo_user_ids", [])
             if user_id in sudo_ids:
-                await msg.reply_text(f"ℹ️ `{user_id}` is already a sudo user.", reply_markup=sudo_management_keyboard())
+                await safe_reply_text(msg, f"ℹ️ `{user_id}` is already a sudo user.", reply_markup=sudo_management_keyboard())
             else:
                 sudo_ids.append(user_id)
                 persist_sudo_users(sudo_ids)
-                await msg.reply_text(
+                await safe_reply_text(
+                    msg,
                     f"✅ Added `{user_id}` as sudo. They now have full operational control.",
                     reply_markup=sudo_management_keyboard(),
                 )
@@ -1366,13 +1435,12 @@ async def main():
         if state.mode == "awaiting_session_name":
             name = (msg.text or "").strip()
             if not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
-                await msg.reply_text(
-                    "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens)."
-                )
+                await safe_reply_text(msg, "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens).")
                 return
             state.pending_session_name = name
             state.mode = "awaiting_session_value"
-            await msg.reply_text(
+            await safe_reply_text(
+                msg,
                 f"Send the session string for `{name}`.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
@@ -1382,11 +1450,11 @@ async def main():
             name = state.pending_session_name
             if not name:
                 state.mode = "idle"
-                await msg.reply_text("Session flow reset. Start again from /start.")
+                await safe_reply_text(msg, "Session flow reset. Start again from /start.")
                 return
             session_str = (msg.text or "").strip()
             if len(session_str) < 10:
-                await msg.reply_text("❌ Session string looks too short. Please provide a valid session string.")
+                await safe_reply_text(msg, "❌ Session string looks too short. Please provide a valid session string.")
                 return
             os.makedirs(SESSIONS_DIR, exist_ok=True)
             dest = os.path.join(SESSIONS_DIR, f"{name}.session")
@@ -1394,7 +1462,8 @@ async def main():
                 f.write(session_str)
             state.mode = "idle"
             state.pending_session_name = None
-            await msg.reply_text(
+            await safe_reply_text(
+                msg,
                 f"✅ Session `{name}` added. Add more or go back home.",
                 reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
             )
@@ -1403,14 +1472,16 @@ async def main():
         if state.mode == "awaiting_group_link":
             link = (msg.text or "").strip()
             if not is_valid_group_link(link):
-                await msg.reply_text(
+                await safe_reply_text(
+                    msg,
                     "❌ Invalid group/channel link. Provide a valid https://t.me invite or @username link.",
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
                 )
                 return
             state.target.group_link = link
             state.mode = "awaiting_message_link"
-            await msg.reply_text(
+            await safe_reply_text(
+                msg,
                 "Great. Now send the target **message link** (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
@@ -1420,20 +1491,16 @@ async def main():
             message_link = (msg.text or "").strip()
             chat_identifier, msg_id = parse_link(message_link)
             if chat_identifier is None or msg_id is None:
-                await msg.reply_text(
-                    "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>."
-                )
+                await safe_reply_text(msg, "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>.")
                 return
             state.target.message_link = message_link
             state.target.chat_identifier = chat_identifier
             state.target.message_id = msg_id
             state.report.session_limit = 0
-            await msg.reply_text("Validating target across sessions…")
-            target, notes = await validate_target_with_sessions(
-                state.target.group_link or "", message_link, state.report.session_limit
-            )
+            await safe_reply_text(msg, "Validating target across sessions…")
+            target, notes = await validate_target_with_sessions(state.target.group_link or "", message_link, state.report.session_limit)
             if not target:
-                await msg.reply_text("\n".join(notes))
+                await safe_reply_text(msg, "\n".join(notes))
                 state.mode = "idle"
                 return
             state.target = target
@@ -1449,7 +1516,7 @@ async def main():
             REPORT_TEXT = text
             persist_report_settings(state)
             state.mode = "idle"
-            await msg.reply_text("✅ Report text updated.", reply_markup=configuration_keyboard(state))
+            await safe_reply_text(msg, "✅ Report text updated.", reply_markup=configuration_keyboard(state))
             return
 
         if state.mode == "awaiting_report_total":
@@ -1458,15 +1525,16 @@ async def main():
                 if total < 0:
                     raise ValueError
             except ValueError:
-                await msg.reply_text("❌ Please send a non-negative integer.")
+                await safe_reply_text(msg, "❌ Please send a non-negative integer.")
                 return
             state.report.report_total = total
             persist_report_settings(state)
             state.mode = "idle"
-            await msg.reply_text(f"✅ Total reports updated to {total}.", reply_markup=configuration_keyboard(state))
+            await safe_reply_text(msg, f"✅ Total reports updated to {total}.", reply_markup=configuration_keyboard(state))
             return
 
-        await msg.reply_text(
+        await safe_reply_text(
+            msg,
             "Use the buttons from /start to navigate the guided flow.",
             reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
         )
