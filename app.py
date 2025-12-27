@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+import textwrap
 from itertools import cycle
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
@@ -366,14 +367,80 @@ def is_valid_group_link(link: str) -> bool:
     return any(re.fullmatch(p, normalized) for p in patterns)
 
 
-def format_reply_card(title: str, lines: List[str]) -> str:
-    width = max(len(title) + 2, max((len(line) for line in lines), default=0) + 2, 28)
-    top = "┌" + "─" * width + "┐"
-    title_line = f"│ {title}".ljust(width + 1, " ") + "│"
-    separator = "├" + "─" * width + "┤"
-    body_lines = [f"│ {line}".ljust(width + 1, " ") + "│" for line in lines]
-    bottom = "└" + "─" * width + "┘"
-    return "\n".join([top, title_line, separator, *body_lines, bottom])
+def _sanitize_and_split(text: str) -> List[str]:
+    sanitized = text.replace("\t", " " * 4)
+    # str.split handles empty strings correctly by returning [""]
+    return sanitized.split("\n")
+
+
+def _wrap_line(line: str, width: int) -> List[str]:
+    if line == "":
+        return [""]
+
+    wrapped = textwrap.wrap(
+        line,
+        width=width,
+        break_long_words=True,
+        break_on_hyphens=False,
+        replace_whitespace=False,
+        drop_whitespace=False,
+    )
+
+    return wrapped or [""]
+
+
+def format_reply_card(
+    title: str, lines: List[str], max_width: int = 60, min_width: int = 28, pad: int = 1
+) -> str:
+    sanitized_title_parts = _sanitize_and_split(title)
+    sanitized_body_parts: List[str] = []
+    for line in lines:
+        sanitized_body_parts.extend(_sanitize_and_split(line))
+
+    all_parts = sanitized_title_parts + sanitized_body_parts
+    longest_visible_line_len = max((len(part) for part in all_parts), default=0)
+    inner_width = max(min_width, longest_visible_line_len)
+    inner_width = min(inner_width, max_width)
+
+    title_lines: List[str] = []
+    for part in sanitized_title_parts:
+        title_lines.extend(_wrap_line(part, inner_width))
+
+    body_lines: List[str] = []
+    for part in sanitized_body_parts:
+        body_lines.extend(_wrap_line(part, inner_width))
+
+    horizontal = "─" * (inner_width + 2 * pad)
+    top = f"┌{horizontal}┐"
+    separator = f"├{horizontal}┤"
+    bottom = f"└{horizontal}┘"
+
+    def format_row(content: str) -> str:
+        return f"│{' ' * pad}{content.ljust(inner_width)}{' ' * pad}│"
+
+    rendered_lines = [top]
+    rendered_lines.extend(format_row(line) for line in title_lines)
+    rendered_lines.append(separator)
+    rendered_lines.extend(format_row(line) for line in body_lines)
+    rendered_lines.append(bottom)
+
+    return "\n".join(rendered_lines)
+
+
+def _demo_format_reply_card() -> None:
+    samples = [
+        ("Empty lines", []),
+        ("A Very Long Title That Exceeds The Normal Width Constraints", ["Short body"]),
+        ("Wrapped line", ["This is a very long line that should wrap nicely across multiple lines without breaking words abruptly."]),
+        (
+            "Line with newline and tab",
+            ["First part\nSecond\tpart with tab and newline included"],
+        ),
+    ]
+
+    for sample_title, sample_lines in samples:
+        print(format_reply_card(sample_title, sample_lines))
+        print()
 
 
 def parse_message_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
