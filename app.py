@@ -650,7 +650,15 @@ async def join_target_chat(
 
     try:
         peer = await client.resolve_peer(chat_identifier)
-        return peer, last_detail or "ℹ️ Resolved target via message link"
+
+        if not last_detail:
+            return peer, "ℹ️ Resolved target via message link"
+
+        normalized_detail = last_detail.lower()
+        if "invalid or unknown public group/channel link" in normalized_detail:
+            return peer, "ℹ️ Resolved target via message link; join link could not be used"
+
+        return peer, last_detail
     except FloodWait as e:
         await asyncio.sleep(e.value)
         return None, f"⏳ FloodWait {e.value}s while resolving target"
