@@ -10,12 +10,14 @@ Only three values are required when you deploy:
 2. `LOG_GROUP_LINK` — the group/channel invite or username link where panels and logs will be posted.
 3. `OWNER_ID` — Telegram user ID of the owner who can change any setting after deployment.
 
-API credentials (`API_ID` and `API_HASH`) must be provided via environment variables. Everything else is configured later from the log group.
+API credentials (`API_ID` and `API_HASH`) can be provided via environment variables or `config.json`. Everything else is configured later from the log group.
 
-`config.json` contains only the minimal deployment fields:
+`config.json` contains the minimal deployment fields and optional API credentials:
 
 ```json
 {
+  "API_ID": null,
+  "API_HASH": "",
   "PRIMARY_SESSION": "",
   "LOG_GROUP_LINK": "",
   "OWNER_ID": null

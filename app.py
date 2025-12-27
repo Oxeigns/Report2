@@ -69,10 +69,19 @@ def load_config() -> Dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
 
+    config.setdefault("API_ID", None)
+    config.setdefault("API_HASH", "")
     config.setdefault("PRIMARY_SESSION", "")
     config.setdefault("LOG_GROUP_LINK", "")
     config.setdefault("OWNER_ID", None)
     return config
+
+
+def parse_int(value: Optional[Union[str, int]]) -> int:
+    try:
+        return int(value) if value is not None else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 def save_config(config: Dict) -> None:
@@ -221,8 +230,8 @@ def get_state(user_id: int) -> ConversationState:
 
 CONFIG = load_config()
 STATE_DATA = load_state()
-API_ID = int(os.getenv("API_ID", 0))
-API_HASH = os.getenv("API_HASH", "")
+API_ID = parse_int(os.getenv("API_ID") or CONFIG.get("API_ID"))
+API_HASH = os.getenv("API_HASH") or CONFIG.get("API_HASH", "")
 OWNER_ID = CONFIG.get("OWNER_ID")
 LOG_GROUP_LINK = CONFIG.get("LOG_GROUP_LINK", "")
 PRIMARY_SESSION = CONFIG.get("PRIMARY_SESSION") or os.getenv("PRIMARY_SESSION", "")
