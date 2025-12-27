@@ -16,15 +16,22 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 from pyrogram.raw import functions, types
-from pyrogram.raw.base import InputReportReason
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from pyrogram.raw.types import (
+    InputReportReasonSpam,
+    InputReportReasonOther,
+    InputReportReasonChildAbuse,
+    InputReportReasonViolence,
+    InputReportReasonIllegalDrugs,
+    InputReportReasonPornography,
+    InputReportReasonPersonalDetails,
+    InputReportReasonCopyright,
+)
+from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# Config paths
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
 SESSIONS_DIR = "sessions"
 
-# Data classes
 @dataclass
 class TargetContext:
     group_link: Optional[str] = None
@@ -56,10 +63,23 @@ class ConversationState:
     pending_sudo_action: Optional[str] = None
     last_panel_text: str = ""
 
-# Globals
 USER_STATES: Dict[int, ConversationState] = {}
 
-# Config + state loading
+REASON_MAP = {
+    "child_abuse": InputReportReasonChildAbuse,
+    "violence": InputReportReasonViolence,
+    "illegal_goods": InputReportReasonIllegalDrugs,
+    "illegal_adult": InputReportReasonPornography,
+    "personal_data": InputReportReasonPersonalDetails,
+    "scam": InputReportReasonSpam,
+    "copyright": InputReportReasonCopyright,
+    "spam": InputReportReasonSpam,
+    "other": InputReportReasonOther,
+}
+
+def resolve_reason_class(key: str):
+    return REASON_MAP.get(key.lower(), InputReportReasonOther)()
+
 def load_config() -> Dict:
     if not os.path.exists(CONFIG_PATH):
         raise FileNotFoundError("Missing config.json")
@@ -78,96 +98,24 @@ def parse_int(value: Optional[Union[str, int]]) -> int:
     except (TypeError, ValueError):
         return 0
 
-def save_config(config: Dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
-
 def load_state() -> Dict:
-    default_state = {
-        "target": {
-            "group_link": "",
-            "message_link": "",
-            "chat_identifier": None,
-            "message_id": None,
-            "chat_title": None,
-            "message_preview": None,
-            "active_sessions": 0,
-        },
-        "report": {
-            "type": "standard",
-            "reason": "other",
-            "text": "",
-            "total": None,
-            "session_limit": 0,
-        },
-        "log_group_id": None,
-        "sudo_user_ids": [],
-    }
     if not os.path.exists(STATE_PATH):
-        return default_state
+        return {
+            "report": {
+                "type": "standard",
+                "reason": "other",
+                "text": "",
+                "total": None,
+                "session_limit": 0,
+            },
+            "log_group_id": None,
+            "sudo_user_ids": [],
+        }
     with open(STATE_PATH, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    for key in default_state:
-        if key not in data:
-            data[key] = default_state[key]
-        elif isinstance(default_state[key], dict):
-            for subkey in default_state[key]:
-                data[key].setdefault(subkey, default_state[key][subkey])
-    return data
+        return json.load(f)
 
-def save_state(state: Dict) -> None:
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
-        json.dump(state, f, indent=2)
-
-def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
-    link = link.strip()
-    m1 = re.match(r"^https?://t\.me/([A-Za-z0-9_]+)/(\d+)$", link)
-    m2 = re.match(r"^https?://t\.me/c/(\d+)/(\d+)$", link)
-    if m1:
-        return m1.group(1), int(m1.group(2))
-    if m2:
-        return int(f"-100{m2.group(1)}"), int(m2.group(2))
-    return None, None
-
-# Continuing from Part 1...
-
-def load_session_strings(max_count: int, include_primary: bool = True) -> List[Tuple[str, str]]:
-    sessions = []
-    if include_primary and PRIMARY_SESSION:
-        sessions.append(("primary", PRIMARY_SESSION))
-    for key, value in os.environ.items():
-        if key.startswith("SESSION_") and value.strip():
-            sessions.append((key, value.strip()))
-    if os.path.isdir(SESSIONS_DIR):
-        for filename in sorted(os.listdir(SESSIONS_DIR)):
-            path = os.path.join(SESSIONS_DIR, filename)
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    content = f.read().strip()
-                    if content:
-                        sessions.append((filename, content))
-    return sessions[:max_count] if max_count else sessions
-
-# Reason map
-REASON_MAP = {
-    "child_abuse": types.InputReportReasonChildAbuse,
-    "violence": types.InputReportReasonViolence,
-    "illegal_goods": types.InputReportReasonIllegalDrugs,
-    "illegal_adult": types.InputReportReasonPornography,
-    "personal_data": types.InputReportReasonPersonalDetails,
-    "scam": types.InputReportReasonSpam,
-    "copyright": types.InputReportReasonCopyright,
-    "spam": types.InputReportReasonSpam,
-    "other": types.InputReportReasonOther,
-}
-
-def resolve_reason_class(key: str) -> InputReportReason:
-    return REASON_MAP.get(key.lower(), types.InputReportReasonOther)()
-
-# Globals from config/state
 CONFIG = load_config()
 STATE_DATA = load_state()
-
 API_ID = parse_int(os.getenv("API_ID") or CONFIG.get("API_ID"))
 API_HASH = os.getenv("API_HASH") or CONFIG.get("API_HASH", "")
 OWNER_ID = parse_int(os.getenv("OWNER_ID") or CONFIG.get("OWNER_ID"))
@@ -177,42 +125,45 @@ PRIMARY_SESSION = CONFIG.get("PRIMARY_SESSION", "")
 REPORT_REASON = resolve_reason_class(STATE_DATA["report"].get("reason", "other"))
 REPORT_TEXT = STATE_DATA["report"].get("text", "")
 
-if not all([API_ID, API_HASH, PRIMARY_SESSION, OWNER_ID]):
-    raise RuntimeError("Missing configuration: Check API_ID, API_HASH, PRIMARY_SESSION, OWNER_ID in config.json or environment")
-
 def is_owner(user_id: Optional[int]) -> bool:
     return user_id is not None and user_id == OWNER_ID
 
-def is_sudo(user_id: Optional[int]) -> bool:
-    return user_id is not None and user_id in STATE_DATA.get("sudo_user_ids", [])
-
 def has_power(user_id: Optional[int]) -> bool:
-    return is_owner(user_id) or is_sudo(user_id)
+    return is_owner(user_id) or user_id in STATE_DATA.get("sudo_user_ids", [])
 
-def get_state(user_id: int) -> ConversationState:
-    if user_id not in USER_STATES:
-        USER_STATES[user_id] = ConversationState()
-        s = USER_STATES[user_id].report
-        rep = STATE_DATA["report"]
-        s.report_text = rep.get("text", "")
-        s.report_reason_key = rep.get("reason", "other")
-        s.report_total = rep.get("total")
-        s.report_type = rep.get("type", "standard")
-        s.session_limit = int(rep.get("session_limit") or 0)
-    return USER_STATES[user_id]
+def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
+    m1 = re.match(r"^https?://t\.me/([A-Za-z0-9_]+)/(\d+)$", link)
+    m2 = re.match(r"^https?://t\.me/c/(\d+)/(\d+)$", link)
+    if m1:
+        return m1.group(1), int(m1.group(2))
+    if m2:
+        return int(f"-100{m2.group(1)}"), int(m2.group(2))
+    return None, None
 
-async def join_target_chat(client: Client, join_link: str, chat_identifier: Union[str, int]) -> Tuple[Optional[types.TypePeer], str]:
+def load_session_strings(max_count: int = 0, include_primary: bool = True) -> List[Tuple[str, str]]:
+    sessions = []
+    if include_primary and PRIMARY_SESSION:
+        sessions.append(("primary", PRIMARY_SESSION))
+    if os.path.isdir(SESSIONS_DIR):
+        for filename in sorted(os.listdir(SESSIONS_DIR)):
+            with open(os.path.join(SESSIONS_DIR, filename), "r", encoding="utf-8") as f:
+                content = f.read().strip()
+                if content:
+                    sessions.append((filename, content))
+    return sessions[:max_count] if max_count else sessions
+
+async def join_target_chat(client: Client, join_link: str, chat_identifier: Union[str, int]):
     try:
         chat = await client.join_chat(join_link)
         return await client.resolve_peer(chat.id), "✅ Joined"
     except UserAlreadyParticipant:
-        return await client.resolve_peer(chat_identifier), "Already a participant"
+        return await client.resolve_peer(chat_identifier), "Already a member"
     except (InviteHashExpired, InviteHashInvalid, UsernameInvalid, UsernameNotOccupied):
-        return None, "❌ Invalid or expired invite"
+        return None, "❌ Invalid link"
     except RPCError as e:
         return None, f"RPC error: {str(e)}"
 
-async def evaluate_session(session_name, session_str, join_link, target, message_id, *, reason=None, report_text=None) -> Tuple[str, str]:
+async def evaluate_session(session_name, session_str, join_link, target, message_id, *, reason=None, report_text=None):
     try:
         async with Client(
             name=f"session_{session_name}",
@@ -243,7 +194,6 @@ async def evaluate_session(session_name, session_str, join_link, target, message
     except Exception as e:
         return "fail", f"Unexpected: {e}"
 
-# Live panel
 async def run_reporting_flow(state: ConversationState, client: Client, chat_id: int):
     sessions = load_session_strings(state.report.session_limit or 0)
     success, fail = 0, 0
@@ -262,36 +212,28 @@ async def run_reporting_flow(state: ConversationState, client: Client, chat_id: 
             success += 1
         else:
             fail += 1
-        text = f"✅ Success: {success} | ❌ Failed: {fail}"
         print(f"{name}: {status} - {detail}")
         if state.live_panel and state.live_panel_chat:
             try:
                 await client.edit_message_text(
                     state.live_panel_chat,
                     state.live_panel,
-                    text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [InlineKeyboardButton("Pause" if not state.paused else "Resume", callback_data="toggle_pause")]
-                    ])
+                    f"✅ Success: {success} | ❌ Failed: {fail}"
                 )
             except RPCError:
                 pass
 
-# Main runner
 async def main():
-    app = Client("moderator_tool", api_id=API_ID, api_hash=API_HASH, session_string=PRIMARY_SESSION)
+    app = Client("mod_tool", api_id=API_ID, api_hash=API_HASH, session_string=PRIMARY_SESSION)
 
     @app.on_message(filters.command("start"))
-    async def on_start(_, msg):
-        if not msg.from_user:
-            return
+    async def start(_, msg):
         if not has_power(msg.from_user.id):
-            await msg.reply("Access denied.")
-            return
+            return await msg.reply("❌ Unauthorized.")
         await msg.reply("✅ Bot is running. Use /run to launch report.")
 
     @app.on_message(filters.command("run"))
-    async def on_run(client, msg):
+    async def run(client, msg):
         if not has_power(msg.from_user.id):
             return await msg.reply("Unauthorized")
         parts = msg.text.split()
@@ -302,13 +244,13 @@ async def main():
             sess_count = int(sess_raw)
             rep_count = int(count_raw)
         except ValueError:
-            return await msg.reply("Invalid number format")
+            return await msg.reply("Invalid numbers")
 
         chat_id, msg_id = parse_link(message_link)
         if chat_id is None or msg_id is None:
             return await msg.reply("❌ Invalid message link")
 
-        state = get_state(msg.from_user.id)
+        state = ConversationState()
         state.target = TargetContext(
             group_link=group_link,
             message_link=message_link,
@@ -318,8 +260,8 @@ async def main():
         state.report.session_limit = sess_count
         state.report.report_total = rep_count
 
-        message = await msg.reply("Launching report...")
-        state.live_panel = message.id
+        sent = await msg.reply("Launching report...")
+        state.live_panel = sent.id
         state.live_panel_chat = msg.chat.id
         await run_reporting_flow(state, client, msg.chat.id)
 
@@ -331,6 +273,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("Bot stopped.")
-
-
+        print("Stopped.")
