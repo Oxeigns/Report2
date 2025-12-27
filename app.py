@@ -16,8 +16,10 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 from pyrogram.raw import functions, types
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+from typing import Any
+InputReportReason = Any
 
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
 SESSIONS_DIR = "sessions"
