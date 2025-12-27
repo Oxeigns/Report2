@@ -2,6 +2,7 @@ import asyncio
 import json
 import os
 import re
+from itertools import cycle
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -787,6 +788,7 @@ async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int]
     report_reason = resolve_reason_class(state.report.report_reason_key)
     report_text = state.report.report_text or REPORT_TEXT
     sessions = load_session_strings(state.report.session_limit or 0)
+    requested_total = state.report.report_total or len(sessions)
 
     header = (
         "🛰️ **Live Reporting Panel**\n"
@@ -794,7 +796,7 @@ async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int]
         f"Message: {state.target.message_link}\n"
         f"Report reason: {state.report.report_reason_key}\n"
         f"Report text: {report_text or 'Not set'}\n"
-        f"Requested total: {state.report.report_total or 'Not set'}\n"
+        f"Requested total: {requested_total}\n"
         f"Sessions available: {len(sessions)}"
     )
 
@@ -807,8 +809,8 @@ async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int]
     successes = 0
     failures = 0
 
-    for session_name, session_str in sessions:
-        if state.paused:
+    for session_name, session_str in cycle(sessions):
+        if state.paused or processed >= requested_total:
             break
         status, detail = await evaluate_session(
             session_name,
@@ -829,7 +831,7 @@ async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int]
             header
             + "\n\n"
             + "**Progress**\n"
-            + f"Sessions processed: {processed}/{len(sessions)}\n"
+            + f"Reports attempted: {processed}/{requested_total}\n"
             + f"Success: {successes}\n"
             + f"Failed: {failures}\n"
             + f"Latest: {session_name} -> {status} ({detail})"
