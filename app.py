@@ -237,7 +237,9 @@ LOG_GROUP_LINK = CONFIG.get("LOG_GROUP_LINK", "")
 PRIMARY_SESSION = CONFIG.get("PRIMARY_SESSION") or os.getenv("PRIMARY_SESSION", "")
 
 if not API_ID or not API_HASH:
-    raise RuntimeError("API_ID and API_HASH must be configured as environment variables")
+    raise RuntimeError(
+        "API_ID and API_HASH must be configured (set env vars or populate config.json)"
+    )
 
 if not PRIMARY_SESSION:
     raise RuntimeError("PRIMARY_SESSION must be configured for the bootstrap account")
