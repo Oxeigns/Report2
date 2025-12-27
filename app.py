@@ -315,10 +315,27 @@ def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     return None, None
 
 
-def is_valid_group_link(link: str) -> bool:
+def normalize_group_link(link: str) -> str:
     normalized = link.strip()
-    if not normalized.startswith(("http://", "https://")):
-        return False
+
+    if normalized.startswith("tg://join?invite="):
+        normalized = normalized.replace("tg://join?invite=", "https://t.me/+", 1)
+
+    if normalized.startswith("@"):  # plain @username
+        normalized = normalized[1:]
+    if re.match(r"^[A-Za-z0-9_]{3,}$", normalized):
+        normalized = f"https://t.me/{normalized}"
+
+    if normalized.startswith("t.me/"):
+        normalized = f"https://{normalized}"
+    if normalized.startswith("telegram.me/"):
+        normalized = normalized.replace("telegram.me/", "t.me/", 1)
+
+    return normalized
+
+
+def is_valid_group_link(link: str) -> bool:
+    normalized = normalize_group_link(link)
     patterns = [
         r"^https?://t\.me/[A-Za-z0-9_]{3,}$",
         r"^https?://t\.me/\+[A-Za-z0-9_-]+$",
@@ -525,9 +542,7 @@ async def join_target_chat(
     join_link: str,
     chat_identifier: Union[str, int],
 ) -> Tuple[Optional[object], str]:
-    normalized = join_link.strip()
-    if not normalized.startswith(("http://", "https://")):
-        return None, "❌ Group/channel link must start with http:// or https://"
+    normalized = normalize_group_link(join_link)
 
     try:
         chat = await client.join_chat(normalized)
@@ -891,7 +906,7 @@ async def main():
             await safe_reply_text(msg, "Invalid group/channel link. Provide a valid https://t.me link.")
             return
         state = get_state(msg.from_user.id)
-        state.target.group_link = link
+        state.target.group_link = normalize_group_link(link)
         state.mode = "awaiting_message_link"
         state.quick_start = False
         await safe_reply_text(
@@ -912,7 +927,7 @@ async def main():
             await safe_reply_text(msg, "Invalid group/channel link. Provide a valid https://t.me link.")
             return
         state = get_state(msg.from_user.id)
-        state.target.group_link = link
+        state.target.group_link = normalize_group_link(link)
         state.mode = "awaiting_message_link"
         state.quick_start = True
         await safe_reply_text(msg, "Send the target message link for quick reporting.")
@@ -1036,11 +1051,15 @@ async def main():
             value = (msg.text or "").strip().lower()
             if value in REASON_MAP:
                 state.report.report_reason_key = value
-                await safe_reply_text(
-                    msg,
-                    "Reason set. Provide number of reports with /set_total_reports or send a number now.",
-                )
-                state.mode = "awaiting_report_total"
+                if state.quick_start:
+                    state.mode = "awaiting_report_text"
+                    await safe_reply_text(msg, "Send a reason/description for the report or type 'skip' to leave it blank.")
+                else:
+                    await safe_reply_text(
+                        msg,
+                        "Reason set. Provide number of reports with /set_total_reports or send a number now.",
+                    )
+                    state.mode = "awaiting_report_total"
             else:
                 await safe_reply_text(msg, "Unknown reason. Choose from: " + ", ".join(REASON_MAP.keys()))
             return
@@ -1054,10 +1073,27 @@ async def main():
                 await safe_reply_text(msg, "Send a positive integer for the number of reports.")
                 return
             state.report.report_total = total
-            state.mode = "idle"
-            await safe_reply_text(msg, f"Total reports set to {total}. Use /start_report to begin.")
             if state.quick_start:
-                await run_reporting_flow(state, msg.chat.id if msg.chat else None, _)
+                state.mode = "awaiting_report_type"
+                await safe_reply_text(
+                    msg,
+                    "Total received. Now send the report type key (" + ", ".join(REASON_MAP.keys()) + ").",
+                )
+            else:
+                state.mode = "idle"
+                await safe_reply_text(msg, f"Total reports set to {total}. Use /start_report to begin.")
+            return
+
+        if state.mode == "awaiting_report_text":
+            text_value = (msg.text or "").strip()
+            if text_value.lower() == "skip":
+                state.report.report_text = ""
+            else:
+                state.report.report_text = text_value
+            state.mode = "idle"
+            await safe_reply_text(msg, "All details captured. Starting reporting…")
+            await run_reporting_flow(state, msg.chat.id if msg.chat else None, _)
+            state.quick_start = False
             return
 
     await app.start()
