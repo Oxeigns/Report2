@@ -633,8 +633,10 @@ async def edit_log_message(
 
 
 async def join_target_chat(
-    client: Client, join_link: str, chat_identifier: Union[str, ) -> Tuple[Optional[object], str]:
-    """Join the target chat using the provided link, handling common errors."""
+    client: Client,
+    join_link: str,
+    chat_identifier: Union[str, int],
+) -> Tuple[Optional[object], str]:
 
     normalized = join_link.strip()
     if not normalized.startswith(("http://", "https://")):
