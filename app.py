@@ -53,6 +53,7 @@ class ConversationState:
     live_panel: Optional[int] = None
     live_panel_chat: Optional[int] = None
     pending_session_name: Optional[str] = None
+    pending_sudo_action: Optional[str] = None
     last_panel_text: str = ""
 
 
@@ -100,6 +101,7 @@ def load_state() -> Dict:
             "session_limit": 0,
         },
         "log_group_id": None,
+        "sudo_user_ids": [],
     }
 
     if not os.path.exists(STATE_PATH):
@@ -116,6 +118,8 @@ def load_state() -> Dict:
         loaded["target"].setdefault(key, value)
     for key, value in default_state["report"].items():
         loaded["report"].setdefault(key, value)
+    if not isinstance(loaded.get("sudo_user_ids"), list):
+        loaded["sudo_user_ids"] = []
 
     return loaded
 
@@ -150,6 +154,11 @@ def persist_target(state: ConversationState) -> None:
             "active_sessions": state.target.active_sessions,
         }
     )
+    save_state(STATE_DATA)
+
+
+def persist_sudo_users(users: List[int]) -> None:
+    STATE_DATA["sudo_user_ids"] = sorted(set(users))
     save_state(STATE_DATA)
 
 
@@ -224,42 +233,44 @@ if not API_ID or not API_HASH:
 if not PRIMARY_SESSION:
     raise RuntimeError("PRIMARY_SESSION must be configured for the bootstrap account")
 
+if OWNER_ID is None:
+    raise RuntimeError("OWNER_ID must be configured and cannot be changed after deployment")
+
 # ----------------------
 # Utilities
 # ----------------------
 
 def format_help() -> str:
     return (
-        "**Guided Telegram Reporting System**\n"
-        "Everything is driven by buttons from the log group or a private chat with the owner. Use the cards to add sessions, "
-        "select a target, configure report settings, and launch reporting without redeploying.\n\n"
-        "**How to use**\n"
-        "1) Press /start to open the main control panel.\n"
-        "2) Add extra sessions when prompted or continue.\n"
-        "3) Set the target group/channel link and the exact message link. We validate across all sessions automatically.\n"
-        "4) Configure report type, reason, text, and number of reports from the buttons.\n"
-        "5) Start reporting to open a live panel with pause/resume and change-target actions.\n\n"
-        "**Owner-only controls**\n"
-        "• Add sessions after deployment.\n"
-        "• Update target links, message links, report type, reason, text, and requested totals at any time.\n"
-        "• Change log group / message metadata shown on the live panels.\n\n"
-        "**Link formats accepted**\n"
-        "• Groups/Channels: https://t.me/<username>, https://t.me/+<invite>, https://t.me/joinchat/<invite>.\n"
-        "• Messages: https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>.\n\n"
-        "Clear errors are shown for invalid links, expired invites, or inaccessible messages."
+        "**Button-driven Telegram Reporting System**\n"
+        "Follow the guided cards to add sessions, pick a target, and launch live reporting without redeploying."
+        "\n\n**How it works**\n"
+        "• /start opens the control panel for the owner and sudo team.\n"
+        "• First choose whether to add new sessions.\n"
+        "• Provide the group/channel link, then the exact message link. We validate everything across all sessions.\n"
+        "• Configure report reason, text, and counts with the buttons.\n"
+        "• Launch reporting to view a live panel with pause/resume, change target, and new-report actions.\n\n"
+        "**Roles**\n"
+        "• Owner (permanent): full control and sudo management.\n"
+        "• Sudo users: same operational powers as owner, managed post-deployment.\n\n"
+        "**Accepted links**\n"
+        "• Groups/Channels: https://t.me/<username>, https://t.me/+<invite>, or https://t.me/joinchat/<invite>.\n"
+        "• Messages: https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>.\n"
+        "Validation ensures invalid peer IDs or expired invites are caught early."
     )
 
 
-def start_keyboard() -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup(
-        [
-            [InlineKeyboardButton("➕ Add New Sessions", callback_data="add_sessions_prompt")],
-            [InlineKeyboardButton("🎯 Set / Change Target", callback_data="setup_target")],
-            [InlineKeyboardButton("⚙️ Configure Report Settings", callback_data="configure")],
-            [InlineKeyboardButton("🚀 Start Reporting", callback_data="begin_report")],
-            [InlineKeyboardButton("ℹ️ Help", callback_data="show_help")],
-        ]
-    )
+def start_keyboard(is_owner: bool = False) -> InlineKeyboardMarkup:
+    buttons: List[List[InlineKeyboardButton]] = [
+        [InlineKeyboardButton("➕ Add New Sessions", callback_data="add_sessions_prompt")],
+        [InlineKeyboardButton("🎯 Set / Change Target", callback_data="setup_target")],
+        [InlineKeyboardButton("⚙️ Configure Report Settings", callback_data="configure")],
+        [InlineKeyboardButton("🚀 Start Reporting", callback_data="begin_report")],
+    ]
+    if is_owner:
+        buttons.append([InlineKeyboardButton("🛡 Manage Sudo Users", callback_data="manage_sudo")])
+    buttons.append([InlineKeyboardButton("ℹ️ Help", callback_data="show_help")])
+    return InlineKeyboardMarkup(buttons)
 
 
 def add_sessions_prompt_keyboard() -> InlineKeyboardMarkup:
@@ -267,6 +278,17 @@ def add_sessions_prompt_keyboard() -> InlineKeyboardMarkup:
         [
             [InlineKeyboardButton("Yes, Add Sessions", callback_data="add_sessions")],
             [InlineKeyboardButton("No, Continue", callback_data="back_home")],
+        ]
+    )
+
+
+def sudo_management_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("➕ Add Sudo", callback_data="sudo_add")],
+            [InlineKeyboardButton("➖ Remove Sudo", callback_data="sudo_remove")],
+            [InlineKeyboardButton("📜 List Sudo Users", callback_data="sudo_list")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back_home")],
         ]
     )
 
@@ -351,6 +373,23 @@ def is_valid_group_link(link: str) -> bool:
         r"^https?://t\.me/joinchat/[A-Za-z0-9_-]+$",  # joinchat links
     ]
     return any(re.match(p, normalized) for p in patterns)
+
+
+async def resolve_user_identifier(app: Client, message) -> Tuple[Optional[int], str]:
+    if message.forward_from:
+        return message.forward_from.id, "Forwarded user detected."
+
+    if message.text:
+        value = message.text.strip()
+        if value.isdigit():
+            return int(value), "User ID provided."
+        username = value.lstrip("@")
+        try:
+            user = await app.get_users(username)
+            return user.id, f"Resolved @{username}."
+        except RPCError:
+            return None, "Unable to resolve the provided username."
+    return None, "Send a Telegram user ID, @username, or forward a message from the user."
 
 
 def format_target_summary(state: ConversationState) -> str:
@@ -700,8 +739,8 @@ async def validate_session_access(
 
 async def handle_run_command(client: Client, message) -> None:
     global OWNER_ID
-    if OWNER_ID is None or OWNER_ID != message.from_user.id:
-        await message.reply_text("❌ Authorization failed. Only OWNER_ID can run this command.")
+    if OWNER_ID is None or not has_power(message.from_user.id if message.from_user else None):
+        await message.reply_text("❌ Authorization failed. Only owner or sudo users can run this command.")
         return
 
     parts = message.text.split()
@@ -812,38 +851,31 @@ async def handle_run_command(client: Client, message) -> None:
 
 
 async def handle_set_owner(client: Client, message) -> None:
-    global OWNER_ID
-    parts = message.text.split()
-    if len(parts) != 2:
-        await message.reply_text("Usage: /set_owner <telegram_id>")
-        return
+    await message.reply_text(
+        f"🔒 Owner is locked to `{OWNER_ID}` and cannot be changed after deployment."
+    )
 
-    if OWNER_ID is not None and message.from_user.id != OWNER_ID:
-        await message.reply_text("❌ Only the current owner can change OWNER_ID.")
-        return
 
-    try:
-        new_owner = int(parts[1])
-    except ValueError:
-        await message.reply_text("telegram_id must be an integer")
-        return
+def is_owner(user_id: Optional[int]) -> bool:
+    return user_id is not None and OWNER_ID is not None and user_id == OWNER_ID
 
-    CONFIG["OWNER_ID"] = new_owner
-    OWNER_ID = new_owner
-    save_config(CONFIG)
-    await message.reply_text(f"✅ OWNER_ID set to {new_owner}")
+
+def is_sudo(user_id: Optional[int]) -> bool:
+    return user_id is not None and user_id in STATE_DATA.get("sudo_user_ids", [])
+
+
+def has_power(user_id: Optional[int]) -> bool:
+    return is_owner(user_id) or is_sudo(user_id)
 
 
 def owner_required(message) -> bool:
-    if OWNER_ID is None or not message.from_user:
-        return False
-    return message.from_user.id == OWNER_ID
+    return bool(message.from_user and is_owner(message.from_user.id))
 
 
 async def handle_set_reason(message) -> None:
     global REPORT_REASON
-    if not owner_required(message):
-        await message.reply_text("❌ Only the log group owner can update the report reason.")
+    if not has_power(message.from_user.id if message.from_user else None):
+        await message.reply_text("❌ Only the owner or sudo users can update the report reason.")
         return
 
     parts = message.text.split(maxsplit=1)
@@ -878,8 +910,8 @@ async def handle_set_reason(message) -> None:
 
 async def handle_set_report_text(message) -> None:
     global REPORT_TEXT
-    if not owner_required(message):
-        await message.reply_text("❌ Only the log group owner can update the report text.")
+    if not has_power(message.from_user.id if message.from_user else None):
+        await message.reply_text("❌ Only the owner or sudo users can update the report text.")
         return
 
     parts = message.text.split(maxsplit=1)
@@ -926,8 +958,8 @@ async def confirm_target_and_configure(
 
 
 async def handle_set_total_reports(message) -> None:
-    if not owner_required(message):
-        await message.reply_text("❌ Only the log group owner can update the total reports.")
+    if not has_power(message.from_user.id if message.from_user else None):
+        await message.reply_text("❌ Only the owner or sudo users can update the total reports.")
         return
 
     parts = message.text.split(maxsplit=1)
@@ -952,8 +984,8 @@ async def handle_set_total_reports(message) -> None:
 
 async def handle_set_links(message) -> None:
     global LOG_GROUP_LINK
-    if not owner_required(message):
-        await message.reply_text("❌ Only the log group owner can update links.")
+    if not has_power(message.from_user.id if message.from_user else None):
+        await message.reply_text("❌ Only the owner or sudo users can update links.")
         return
 
     parts = message.text.split(maxsplit=1)
@@ -976,8 +1008,8 @@ async def handle_set_links(message) -> None:
 
 
 async def handle_add_session(message) -> None:
-    if not owner_required(message):
-        await message.reply_text("❌ Only the log group owner can add sessions.")
+    if not has_power(message.from_user.id if message.from_user else None):
+        await message.reply_text("❌ Only the owner or sudo users can add sessions.")
         return
 
     parts = message.text.split(maxsplit=2)
@@ -1014,34 +1046,29 @@ async def main():
 
     @app.on_message(filters.command("start"))
     async def _start(_, msg):
-        global OWNER_ID
-        if msg.from_user:
-            state = get_state(msg.from_user.id)
-        else:
-            await msg.reply_text("⚠️ Start is only available in private chats with the owner.")
+        if not msg.from_user:
+            await msg.reply_text("⚠️ Start is available only from owner/sudo private chats or the log group.")
             return
 
-        if OWNER_ID is None and msg.from_user:
-            OWNER_ID = msg.from_user.id
-            CONFIG["OWNER_ID"] = OWNER_ID
-            save_config(CONFIG)
-        if not owner_required(msg):
-            await msg.reply_text("❌ Only the configured owner can control this bot.")
+        state = get_state(msg.from_user.id)
+        if not has_power(msg.from_user.id):
+            await msg.reply_text("❌ Only the owner or configured sudo users can control this bot.")
             return
 
         state.mode = "idle"
+        state.pending_sudo_action = None
         if not state.target.group_link:
             state.target = TargetContext()
         state.report.report_text = STATE_DATA["report"].get("text", "")
         state.report.report_total = STATE_DATA["report"].get("total")
         state.report.report_type = STATE_DATA["report"].get("type", "standard")
         await msg.reply_text(
-            "Welcome to the guided reporting panel. Do you want to add new sessions before continuing?",
+            "Do you want to add new sessions? Use the buttons to continue the guided setup.",
             reply_markup=add_sessions_prompt_keyboard(),
         )
         await msg.reply_text(
-            "Use the buttons below to configure targets, report settings, or start reporting.",
-            reply_markup=start_keyboard(),
+            "Main control panel ready. Follow the buttons to set targets, configure reports, or launch the live panel.",
+            reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
         )
 
     @app.on_message(filters.command("help"))
@@ -1079,14 +1106,97 @@ async def main():
     @app.on_callback_query()
     async def _callbacks(client: Client, cq: CallbackQuery):
         if OWNER_ID is None:
-            await cq.answer("Set OWNER_ID first via /set_owner.", show_alert=True)
+            await cq.answer("Set OWNER_ID first via config.json.", show_alert=True)
             return
-        if not cq.from_user or cq.from_user.id != OWNER_ID:
-            await cq.answer("Only the owner can use these controls.", show_alert=True)
+        if not cq.from_user or not has_power(cq.from_user.id):
+            await cq.answer("Only the owner or sudo users can use these controls.", show_alert=True)
             return
 
         state = get_state(cq.from_user.id)
         data = cq.data or ""
+
+        if data == "manage_sudo":
+            if not is_owner(cq.from_user.id):
+                await cq.answer("Only the owner can manage sudo users.", show_alert=True)
+                return
+            await cq.message.reply_text(
+                "Owner panel: manage sudo users post-deployment.",
+                reply_markup=sudo_management_keyboard(),
+            )
+            await cq.answer()
+            return
+
+        if data == "sudo_add":
+            if not is_owner(cq.from_user.id):
+                await cq.answer("Only the owner can add sudo users.", show_alert=True)
+                return
+            state.mode = "awaiting_sudo_add"
+            state.pending_sudo_action = "add"
+            await cq.message.reply_text(
+                "Send the sudo user as an ID, @username, or forward a message from them.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                ),
+            )
+            await cq.answer()
+            return
+
+        if data == "sudo_remove":
+            if not is_owner(cq.from_user.id):
+                await cq.answer("Only the owner can remove sudo users.", show_alert=True)
+                return
+            sudo_ids = STATE_DATA.get("sudo_user_ids", [])
+            if not sudo_ids:
+                await cq.message.reply_text("No sudo users configured.")
+                await cq.answer()
+                return
+            rows = [
+                [InlineKeyboardButton(str(uid), callback_data=f"sudo_remove:{uid}")]
+                for uid in sudo_ids
+            ]
+            rows.append([InlineKeyboardButton("⬅️ Back", callback_data="manage_sudo")])
+            await cq.message.reply_text(
+                "Select a sudo user to remove.", reply_markup=InlineKeyboardMarkup(rows)
+            )
+            await cq.answer()
+            return
+
+        if data == "sudo_list":
+            if not is_owner(cq.from_user.id):
+                await cq.answer("Only the owner can view sudo roster.", show_alert=True)
+                return
+            sudo_ids = STATE_DATA.get("sudo_user_ids", [])
+            if not sudo_ids:
+                await cq.message.reply_text("No sudo users configured.")
+            else:
+                await cq.message.reply_text(
+                    "Current sudo users:\n" + "\n".join(f"• {uid}" for uid in sudo_ids)
+                )
+            await cq.answer()
+            return
+
+        if data.startswith("sudo_remove:"):
+            if not is_owner(cq.from_user.id):
+                await cq.answer("Only the owner can remove sudo users.", show_alert=True)
+                return
+            _, raw_id = data.split(":", 1)
+            try:
+                remove_id = int(raw_id)
+            except ValueError:
+                await cq.answer("Invalid user id", show_alert=True)
+                return
+            sudo_ids = STATE_DATA.get("sudo_user_ids", [])
+            if remove_id in sudo_ids:
+                sudo_ids.remove(remove_id)
+                persist_sudo_users(sudo_ids)
+                await cq.message.reply_text(
+                    f"Removed sudo access for `{remove_id}`.",
+                    reply_markup=sudo_management_keyboard(),
+                )
+            else:
+                await cq.message.reply_text("User not in sudo list.")
+            await cq.answer()
+            return
 
         if data == "add_sessions_prompt":
             await cq.message.reply_text(
@@ -1131,8 +1241,10 @@ async def main():
 
         if data == "back_home":
             state.mode = "idle"
+            state.pending_sudo_action = None
             await cq.message.reply_text(
-                "Back to home. Choose what to do next.", reply_markup=start_keyboard()
+                "Back to home. Choose what to do next.",
+                reply_markup=start_keyboard(is_owner=is_owner(cq.from_user.id)),
             )
             await cq.answer()
             return
@@ -1229,13 +1341,45 @@ async def main():
         if not msg.from_user:
             return
         if OWNER_ID is None:
-            await msg.reply_text("Set OWNER_ID first with /set_owner.")
+            await msg.reply_text("Set OWNER_ID first in config.json.")
             return
-        if msg.from_user.id != OWNER_ID:
-            await msg.reply_text("❌ Only the configured owner can control this bot.")
+        if not has_power(msg.from_user.id):
+            await msg.reply_text("❌ Only the owner or sudo users can control this bot.")
             return
 
         state = get_state(msg.from_user.id)
+
+        if state.mode == "awaiting_sudo_add":
+            if not is_owner(msg.from_user.id):
+                state.mode = "idle"
+                state.pending_sudo_action = None
+                await msg.reply_text("Only the owner can manage sudo users.")
+                return
+            user_id, detail = await resolve_user_identifier(app, msg)
+            if not user_id:
+                await msg.reply_text(f"❌ {detail}")
+                return
+            if user_id == OWNER_ID:
+                await msg.reply_text("Owner is already fully privileged and cannot be demoted.")
+                state.mode = "idle"
+                state.pending_sudo_action = None
+                return
+            sudo_ids = STATE_DATA.get("sudo_user_ids", [])
+            if user_id in sudo_ids:
+                await msg.reply_text(
+                    f"ℹ️ `{user_id}` is already a sudo user.",
+                    reply_markup=sudo_management_keyboard(),
+                )
+            else:
+                sudo_ids.append(user_id)
+                persist_sudo_users(sudo_ids)
+                await msg.reply_text(
+                    f"✅ Added `{user_id}` as sudo. They now have full operational control.",
+                    reply_markup=sudo_management_keyboard(),
+                )
+            state.mode = "idle"
+            state.pending_sudo_action = None
+            return
 
         if state.mode == "awaiting_session_name":
             name = msg.text.strip()
@@ -1272,7 +1416,7 @@ async def main():
             state.pending_session_name = None
             await msg.reply_text(
                 f"✅ Session `{name}` added. Add more or go back home.",
-                reply_markup=start_keyboard(),
+                reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
             )
             return
 
@@ -1353,7 +1497,7 @@ async def main():
 
     await msg.reply_text(
         "Use the buttons from /start to navigate the guided flow.",
-        reply_markup=start_keyboard(),
+        reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
     )
 
     await app.start()

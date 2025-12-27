@@ -15,5 +15,6 @@
     "total": null,
     "session_limit": 0
   },
-  "log_group_id": null
+  "log_group_id": null,
+  "sudo_user_ids": []
 }
