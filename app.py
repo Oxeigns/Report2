@@ -16,6 +16,7 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 from pyrogram.raw import functions, types
+from pyrogram.raw.base import InputReportReason
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 CONFIG_PATH = "config.json"
@@ -560,13 +561,13 @@ REASON_MAP = {
 }
 
 
-def resolve_reason_class(key: str) -> types.TypeInputReportReason:
+def resolve_reason_class(key: str) -> InputReportReason:
     normalized = key.strip().lower()
     cls = REASON_MAP.get(normalized, types.InputReportReasonOther)
     return cls()
 
 
-def reason_from_config() -> types.TypeInputReportReason:
+def reason_from_config() -> InputReportReason:
     configured_reason = STATE_DATA["report"].get("reason", "other")
     normalized = str(configured_reason).strip().lower()
     if normalized in REASON_MAP:
@@ -666,7 +667,7 @@ async def evaluate_session(
     target: Union[str, int],
     message_id: int,
     *,
-    reason: Optional[types.TypeInputReportReason] = None,
+    reason: Optional[InputReportReason] = None,
     report_text: Optional[str] = None,
 ) -> Tuple[str, str]:
     try:
