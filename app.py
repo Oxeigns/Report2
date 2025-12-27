@@ -6,7 +6,15 @@ import time
 from typing import Dict, List, Optional, Tuple, Union
 
 from pyrogram import Client, filters
-from pyrogram.errors import FloodWait, InviteHashExpired, RPCError
+from pyrogram.errors import (
+    FloodWait,
+    InviteHashExpired,
+    InviteHashInvalid,
+    RPCError,
+    UserAlreadyParticipant,
+    UsernameInvalid,
+    UsernameNotOccupied,
+)
 from pyrogram.raw import functions, types
 
 CONFIG_PATH = "config.json"
@@ -90,7 +98,7 @@ def format_help() -> str:
         "Quickly validate a target Telegram message across multiple user sessions, log the results, and submit reports with "
         "clear, auditable updates.\n\n"
         "Core commands (owner only):\n"
-        "• `/run <target_link> <sessions_count> <requested_count>` — validate and report against a target message.\n"
+        "• `/run <group_link> <message_link> <sessions_count> <requested_count>` — join the chat, validate the message, and report.\n"
         "• `/set_owner <telegram_id>` — assign or change the OWNER_ID when authorized.\n"
         "• `/set_reason <reason>` — update the report reason (child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other).\n"
         "• `/set_report_text <text>` — set the report text/message body.\n"
@@ -98,7 +106,8 @@ def format_help() -> str:
         "• `/set_links <log_group_link> <group_message_link>` — refresh invite and message links shown in the review panel.\n"
         "• `/add_session <name> <session_string>` — register an additional session string without redeploying.\n\n"
         "Input rules for `/run`:\n"
-        "• target_link: https://t.me/<username>/<message_id> or https://t.me/c/<internal_id>/<message_id>\n"
+        "• group_link: Any public or private Telegram group/channel link (invite or @username).\n"
+        "• message_link: https://t.me/<username>/<message_id> or https://t.me/c/<internal_id>/<message_id>\n"
         "• sessions_count: integer 1-100 (number of sessions to use)\n"
         "• requested_count: integer 1-500 (for logging reference)\n\n"
         "Authorization & safety:\n"
@@ -109,8 +118,8 @@ def format_help() -> str:
 
 def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     link = link.strip()
-    pattern_username = r"^https://t\.me/([A-Za-z0-9_]+)/([0-9]+)$"
-    pattern_c = r"^https://t\.me/c/([0-9]+)/([0-9]+)$"
+    pattern_username = r"^https?://t\.me/([A-Za-z0-9_]+)/([0-9]+)$"
+    pattern_c = r"^https?://t\.me/c/([0-9]+)/([0-9]+)$"
 
     m_username = re.match(pattern_username, link)
     if m_username:
@@ -192,7 +201,42 @@ async def edit_log_message(client: Client, chat_id: int, message_id: int, text: 
         pass
 
 
-async def evaluate_session(session_name: str, session_str: str, target: str, message_id: int) -> Tuple[str, str]:
+async def join_target_chat(
+    client: Client, join_link: str, chat_identifier: Union[str, int]
+) -> Tuple[Optional[types.TypePeer], str]:
+    """Join the target chat using the provided link, handling common errors."""
+
+    normalized = join_link.strip()
+    if not normalized.startswith(("http://", "https://")):
+        return None, "❌ Group/channel link must start with http:// or https://"
+
+    try:
+        chat = await client.join_chat(normalized)
+        return await client.resolve_peer(chat.id), "✅ Joined group/channel"
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        return None, f"⏳ FloodWait {e.value}s while joining"
+    except UserAlreadyParticipant:
+        try:
+            peer = await client.resolve_peer(chat_identifier)
+            return peer, "ℹ️ Already a participant"
+        except RPCError as e:  # pragma: no cover - defensive
+            return None, f"⚠️ Could not confirm membership: {e.MESSAGE or e}"  # type: ignore
+    except (InviteHashExpired, InviteHashInvalid):
+        return None, "❌ Invite link expired or invalid"
+    except (UsernameInvalid, UsernameNotOccupied):
+        return None, "❌ Invalid or unknown public group/channel link"
+    except RPCError as e:
+        return None, f"❌ Failed to join: {e.MESSAGE or e}"  # type: ignore
+
+
+async def evaluate_session(
+    session_name: str,
+    session_str: str,
+    join_link: str,
+    target: Union[str, int],
+    message_id: int,
+) -> Tuple[str, str]:
     try:
         async with Client(
             name=f"session_{session_name}",
@@ -203,8 +247,17 @@ async def evaluate_session(session_name: str, session_str: str, target: str, mes
         ) as user_client:
             me = await user_client.get_me()
             try:
-                msg = await user_client.get_messages(target, message_id)
-                peer = await user_client.resolve_peer(target)
+                peer, join_detail = await join_target_chat(
+                    user_client, join_link, target
+                )
+                if not peer:
+                    return "invalid", f"Join failed: {join_detail}"
+
+                try:
+                    msg = await user_client.get_messages(target, message_id)
+                except RPCError as e:
+                    return "inaccessible", f"Message error: {e.MESSAGE or e}"  # type: ignore
+
                 await user_client.invoke(
                     functions.messages.Report(
                         peer=peer,
@@ -213,7 +266,7 @@ async def evaluate_session(session_name: str, session_str: str, target: str, mes
                         message=REPORT_TEXT,
                     )
                 )
-                return "reachable", f"Session {me.id} ok"
+                return "reachable", f"Session {me.id} ok ({join_detail})"
             except FloodWait as e:
                 await asyncio.sleep(e.value)
                 return "floodwait", f"FloodWait {e.value}s"
@@ -235,11 +288,13 @@ async def handle_run_command(client: Client, message) -> None:
         return
 
     parts = message.text.split()
-    if len(parts) != 4:
-        await message.reply_text("Usage: /run <target_link> <sessions_count> <requested_count>")
+    if len(parts) != 5:
+        await message.reply_text(
+            "Usage: /run <group_link> <message_link> <sessions_count> <requested_count>"
+        )
         return
 
-    _, target_link, sessions_count_raw, requested_count_raw = parts
+    _, group_link, target_link, sessions_count_raw, requested_count_raw = parts
 
     try:
         sessions_count = int(sessions_count_raw)
@@ -260,9 +315,15 @@ async def handle_run_command(client: Client, message) -> None:
         await message.reply_text("requested_count must be between 1 and 500")
         return
 
+    if not group_link.startswith(("http://", "https://")):
+        await message.reply_text("❌ group_link must start with http:// or https://")
+        return
+
     chat_identifier, msg_id = parse_link(target_link)
     if chat_identifier is None or msg_id is None:
-        await message.reply_text("❌ Invalid link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>")
+        await message.reply_text(
+            "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>"
+        )
         return
 
     sessions = load_session_strings(sessions_count)
@@ -274,6 +335,7 @@ async def handle_run_command(client: Client, message) -> None:
 
     panel_lines = [
         "🛰️ **Review Panel Initialized**",
+        f"Target group/channel: {group_link}",
         f"Target message: {target_link}",
         f"Chat reference: {chat_identifier}",
         f"Message ID: {msg_id}",
@@ -298,7 +360,9 @@ async def handle_run_command(client: Client, message) -> None:
     processed = 0
 
     for session_name, session_str in sessions:
-        status, detail = await evaluate_session(session_name, session_str, chat_identifier, msg_id)
+        status, detail = await evaluate_session(
+            session_name, session_str, group_link, chat_identifier, msg_id
+        )
         processed += 1
         if status == "reachable":
             reachable += 1
@@ -307,6 +371,7 @@ async def handle_run_command(client: Client, message) -> None:
         panel_text = (
             "🛰️ **Review Panel**\n"
             "**Target details**\n"
+            f"• Group/channel link: {group_link}\n"
             f"• Link: {target_link}\n"
             f"• Chat: {chat_identifier} | Message: {msg_id}\n"
             f"• Requested sessions: {sessions_count} | Requested count: {requested_count}\n"
