@@ -1,65 +1,77 @@
-# 🚨 Report2 — Telegram Auto Reporter (Multi-Session)
+# 🚨 Moderator Report & Logging Tool
 
-Report2 is a **Telegram Auto-Reporter** built with [Pyrogram](https://docs.pyrogram.org/) that automatically reports illegal or harmful content to Telegram using **real API reports** (MTProto).  
-It supports **multiple user sessions**, **custom report types**, and **Heroku one-click deployment**.
+This project is a **Pyrogram-based moderator helper** that validates whether a target Telegram message is reachable across multiple user sessions, logs the results in a log group, and issues automated Telegram complaints using `functions.messages.Report`.
 
----
+## Features
 
-## ⚙️ Features
+- Multi-session validation with detailed per-session status
+- Automated complaint submission using `functions.messages.Report`
+- Live review panel inside the log group with ongoing updates
+- Strict command permissions via `OWNER_ID`
+- Clear help command and safe error handling
 
-✅ Real Telegram API report requests (`messages.Report`)  
-✅ Multi-session support (`SESSION_1`, `SESSION_2`, `SESSION_3`, …)  
-✅ Custom report reasons (child abuse, scam, violence, etc.)  
-✅ Adjustable number of reports  
-✅ Works automatically after deployment  
-✅ Safe rate-limiting between reports  
+## Configuration
 
----
+Update `config.json` with your credentials:
 
-## 🚀 Deploy to Heroku
+```json
+{
+  "API_ID": "your_api_id",
+  "API_HASH": "your_api_hash",
+  "REPORT_TEXT": "Illegal content detected",
+  "REPORT_REASON_CHILD_ABUSE": true,
+  "REPORT_REASON_VIOLENCE": false,
+  "REPORT_REASON_ILLEGAL_GOODS": false,
+  "REPORT_REASON_ILLEGAL_ADULT": false,
+  "REPORT_REASON_PERSONAL_DATA": false,
+  "REPORT_REASON_SCAM": false,
+  "REPORT_REASON_COPYRIGHT": false,
+  "REPORT_REASON_SPAM": false,
+  "REPORT_REASON_OTHER": false,
+  "OWNER_ID": null,
+  "LOG_GROUP_ID": 0
+}
+```
 
-You can deploy this app to Heroku directly by clicking the button below 👇  
+Set the report reason flags so that exactly one is `true`. You must also provide session strings via environment variables (`SESSION_1`, `SESSION_2`, …) or files inside a `sessions/` directory. The first session is used to run the command listener; additional sessions are used for validation.
 
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/Oxeigns/Report2)
+## Usage
 
----
+Commands are issued in the configured log group.
 
-## 🧩 Required Environment Variables
+- `/help` — show all usage instructions.
+- `/set_owner <telegram_id>` — can be used once when `OWNER_ID` is `null`, or later by the current owner to update ownership.
+- `/run <target_link> <sessions_count> <requested_count>` — runs validation and reporting.
 
-Set these values in Heroku → **Settings → Config Vars**:
+### Input rules for `/run`
 
-| Variable | Description | Example |
-|-----------|--------------|----------|
-| `API_ID` | Your Telegram API ID from https://my.telegram.org | `123456` |
-| `API_HASH` | Your Telegram API Hash | `abcd1234abcd1234abcd1234` |
-| `SESSION_1` | Pyrogram session string (user 1) | `BQDf...` |
-| `SESSION_2` | Pyrogram session string (user 2, optional) | `BQFg...` |
-| `SESSION_3` | Pyrogram session string (user 3, optional) | `BQHg...` |
-| `CHANNEL_LINK` | Telegram channel or group link | `https://t.me/example` |
-| `MESSAGE_LINK` | Full message link to report | `https://t.me/example/12` |
-| `NUMBER_OF_REPORTS` | How many reports to send | `3` |
-| `REPORT_TEXT` | Reason for reporting | `Illegal content detected` |
-| `REPORT_REASON_CHILD_ABUSE` | `true` / `false` | `true` |
-| `REPORT_REASON_VIOLENCE` | `true` / `false` | `false` |
-| `REPORT_REASON_ILLEGAL_GOODS` | `true` / `false` | `false` |
-| `REPORT_REASON_ILLEGAL_ADULT` | `true` / `false` | `false` |
-| `REPORT_REASON_PERSONAL_DATA` | `true` / `false` | `false` |
-| `REPORT_REASON_SCAM` | `true` / `false` | `false` |
-| `REPORT_REASON_COPYRIGHT` | `true` / `false` | `false` |
-| `REPORT_REASON_SPAM` | `true` / `false` | `false` |
-| `REPORT_REASON_OTHER` | `true` / `false` | `false` |
+- `target_link` must be `https://t.me/<username>/<message_id>` or `https://t.me/c/<internal_id>/<message_id>`.
+- `sessions_count` must be an integer between **1** and **100** (how many sessions to test).
+- `requested_count` must be an integer between **1** and **500** (logged for reference).
 
-Only **one** report type should be set to `true` at a time.  
-All others should remain `false`.
+If any validation fails, the bot returns a clear error instead of running.
 
----
+### Review panel
 
-## 📦 Local Setup (Optional)
+When `/run` is executed by the owner, the tool:
 
-If you want to run this locally instead of Heroku:
+1. Iterates through the available sessions (up to `sessions_count`).
+2. For each session, connects, validates with `get_me()`, fetches the target message, and attempts `functions.messages.Report`.
+3. Logs the accessibility result (reachable, inaccessible, floodwait, invalid) in the log group.
+4. Edits a live **Review Panel** message with target link, parsed chat/message IDs, requested counts, validated session totals, reachable totals, and per-session errors.
+
+FloodWaits are handled automatically with pauses, and if the log group invite link expires the tool falls back to `LOG_GROUP_ID` when possible.
+
+## Safety Notice
+
+- This tool sends real Telegram complaints via `functions.messages.Report`. Use responsibly and only on content that violates Telegram rules.
+- Keep your session strings private and secure.
+
+## Running locally
 
 ```bash
-git clone https://github.com/Oxeigns/Report2.git
-cd Report2
 pip install -r requirements.txt
-python3 app.py
+python app.py
+```
+
+Ensure you have set the required environment variables and sessions before starting the tool.
