@@ -1,0 +1,19 @@
+{
+  "target": {
+    "group_link": "",
+    "message_link": "",
+    "chat_identifier": null,
+    "message_id": null,
+    "chat_title": null,
+    "message_preview": null,
+    "active_sessions": 0
+  },
+  "report": {
+    "type": "standard",
+    "reason": "other",
+    "text": "",
+    "total": null,
+    "session_limit": 0
+  },
+  "log_group_id": null
+}

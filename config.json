@@ -1,15 +1,5 @@
 {
-  "API_ID": "your_api_id",
-  "API_HASH": "your_api_hash",
-  "REPORT_TEXT": "",
-  "REPORT_REASON": "other",
-  "REPORT_TYPE": "standard",
-  "TOTAL_REPORTS": null,
-  "REPORT_SESSION_LIMIT": 0,
-  "OWNER_ID": null,
-  "LOG_GROUP_ID": 0,
+  "PRIMARY_SESSION": "",
   "LOG_GROUP_LINK": "",
-  "GROUP_MESSAGE_LINK": "",
-  "TARGET_GROUP_LINK": "",
-  "TARGET_MESSAGE_LINK": ""
+  "OWNER_ID": null
 }

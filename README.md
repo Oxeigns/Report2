@@ -2,32 +2,23 @@
 
 A **button-driven Telegram reporting system** built on Pyrogram. Validate targets across multiple user sessions, log the results in a dedicated log group, and run complaint submissions with live progress updates.
 
-## Deployment-time setup (one-time)
+## Deployment-time setup (minimal)
 
-Set `API_ID`, `API_HASH`, and provide exactly one primary session string (via `SESSION_1` or a file in `sessions/`). During first start, set:
+Only three values are required when you deploy:
 
-- `OWNER_ID` — only this user can change settings.
-- `LOG_GROUP_LINK` — where control panels and logs are posted (optional `LOG_GROUP_ID` fallback).
+1. `PRIMARY_SESSION` — exactly one bootstrap Telegram client session string.
+2. `LOG_GROUP_LINK` — the group/channel invite or username link where panels and logs will be posted.
+3. `OWNER_ID` — Telegram user ID of the owner who can change any setting after deployment.
 
-All other options are configured later from inside the log group.
+API credentials (`API_ID` and `API_HASH`) must be provided via environment variables. Everything else is configured later from the log group.
 
-`config.json` defaults are provided for convenience:
+`config.json` contains only the minimal deployment fields:
 
 ```json
 {
-  "API_ID": "your_api_id",
-  "API_HASH": "your_api_hash",
-  "REPORT_TEXT": "",
-  "REPORT_REASON": "other",
-  "REPORT_TYPE": "standard",
-  "TOTAL_REPORTS": null,
-  "REPORT_SESSION_LIMIT": 0,
-  "OWNER_ID": null,
-  "LOG_GROUP_ID": 0,
+  "PRIMARY_SESSION": "",
   "LOG_GROUP_LINK": "",
-  "GROUP_MESSAGE_LINK": "",
-  "TARGET_GROUP_LINK": "",
-  "TARGET_MESSAGE_LINK": ""
+  "OWNER_ID": null
 }
 ```
 
@@ -40,7 +31,7 @@ From the log group (owner only):
 - Configure report type, reason, body text, session limits, and number of reports.
 - Update log-group metadata shown on panels.
 
-Changes are persisted immediately to `config.json`.
+Changes are persisted immediately to `state.json` for runtime data and `config.json` for the minimal deployment values.
 
 ## Guided usage
 

@@ -19,6 +19,7 @@ from pyrogram.raw import functions, types
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 CONFIG_PATH = "config.json"
+STATE_PATH = "state.json"
 SESSIONS_DIR = "sessions"
 
 
@@ -67,19 +68,9 @@ def load_config() -> Dict:
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         config = json.load(f)
 
-    if "OWNER_ID" not in config:
-        config["OWNER_ID"] = None
-
-    config.setdefault("REPORT_REASON", None)
-    config.setdefault("REPORT_TEXT", "")
-    config.setdefault("TOTAL_REPORTS", None)
+    config.setdefault("PRIMARY_SESSION", "")
     config.setdefault("LOG_GROUP_LINK", "")
-    config.setdefault("GROUP_MESSAGE_LINK", "")
-    config.setdefault("TARGET_GROUP_LINK", "")
-    config.setdefault("TARGET_MESSAGE_LINK", "")
-    config.setdefault("REPORT_SESSION_LIMIT", 0)
-    config.setdefault("REPORT_TYPE", "standard")
-
+    config.setdefault("OWNER_ID", None)
     return config
 
 
@@ -90,25 +81,85 @@ def save_config(config: Dict) -> None:
     os.replace(tmp_path, CONFIG_PATH)
 
 
+def load_state() -> Dict:
+    default_state = {
+        "target": {
+            "group_link": "",
+            "message_link": "",
+            "chat_identifier": None,
+            "message_id": None,
+            "chat_title": None,
+            "message_preview": None,
+            "active_sessions": 0,
+        },
+        "report": {
+            "type": "standard",
+            "reason": "other",
+            "text": "",
+            "total": None,
+            "session_limit": 0,
+        },
+        "log_group_id": None,
+    }
+
+    if not os.path.exists(STATE_PATH):
+        return default_state
+
+    with open(STATE_PATH, "r", encoding="utf-8") as f:
+        loaded = json.load(f)
+
+    # Merge defaults to stay backward compatible
+    for key, value in default_state.items():
+        if key not in loaded:
+            loaded[key] = value
+    for key, value in default_state["target"].items():
+        loaded["target"].setdefault(key, value)
+    for key, value in default_state["report"].items():
+        loaded["report"].setdefault(key, value)
+
+    return loaded
+
+
+def save_state(state: Dict) -> None:
+    tmp_path = f"{STATE_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(tmp_path, STATE_PATH)
+
+
 def persist_report_settings(state: ConversationState) -> None:
-    CONFIG["REPORT_TEXT"] = state.report.report_text
-    CONFIG["REPORT_REASON"] = state.report.report_reason_key
-    CONFIG["REPORT_SESSION_LIMIT"] = state.report.session_limit
-    CONFIG["TOTAL_REPORTS"] = state.report.report_total
-    CONFIG["REPORT_TYPE"] = state.report.report_type
-    save_config(CONFIG)
+    STATE_DATA["report"] = {
+        "type": state.report.report_type,
+        "reason": state.report.report_reason_key,
+        "text": state.report.report_text,
+        "total": state.report.report_total,
+        "session_limit": state.report.session_limit,
+    }
+    save_state(STATE_DATA)
 
 
 def persist_target(state: ConversationState) -> None:
-    CONFIG["TARGET_GROUP_LINK"] = state.target.group_link or ""
-    CONFIG["TARGET_MESSAGE_LINK"] = state.target.message_link or ""
-    save_config(CONFIG)
+    STATE_DATA["target"].update(
+        {
+            "group_link": state.target.group_link or "",
+            "message_link": state.target.message_link or "",
+            "chat_identifier": state.target.chat_identifier,
+            "message_id": state.target.message_id,
+            "chat_title": state.target.chat_title,
+            "message_preview": state.target.message_preview,
+            "active_sessions": state.target.active_sessions,
+        }
+    )
+    save_state(STATE_DATA)
 
 
-def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
+def load_session_strings(max_count: int, include_primary: bool = True) -> List[Tuple[str, str]]:
     sessions: List[Tuple[str, str]] = []
 
-    # Environment sessions
+    if include_primary and PRIMARY_SESSION:
+        sessions.append(("primary", PRIMARY_SESSION))
+
+    # Environment sessions (kept for backward compatibility)
     for key, value in sorted(os.environ.items()):
         if key.startswith("SESSION_") and value.strip():
             sessions.append((key, value.strip()))
@@ -131,39 +182,47 @@ def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
 def get_state(user_id: int) -> ConversationState:
     if user_id not in USER_STATES:
         USER_STATES[user_id] = ConversationState()
-        USER_STATES[user_id].report.report_text = CONFIG.get("REPORT_TEXT", "")
-        USER_STATES[user_id].report.report_reason_key = (
-            CONFIG.get("REPORT_REASON") or "other"
+        USER_STATES[user_id].report.report_text = STATE_DATA["report"].get("text", "")
+        USER_STATES[user_id].report.report_reason_key = STATE_DATA["report"].get(
+            "reason", "other"
         )
-        USER_STATES[user_id].report.report_total = CONFIG.get("TOTAL_REPORTS")
-        USER_STATES[user_id].report.report_type = CONFIG.get("REPORT_TYPE", "standard")
+        USER_STATES[user_id].report.report_total = STATE_DATA["report"].get("total")
+        USER_STATES[user_id].report.report_type = STATE_DATA["report"].get(
+            "type", "standard"
+        )
         USER_STATES[user_id].report.session_limit = int(
-            CONFIG.get("REPORT_SESSION_LIMIT") or 0
+            STATE_DATA["report"].get("session_limit") or 0
         )
-        if CONFIG.get("TARGET_GROUP_LINK") and CONFIG.get("TARGET_MESSAGE_LINK"):
-            chat_identifier, message_id = parse_link(CONFIG["TARGET_MESSAGE_LINK"])
-            USER_STATES[user_id].target.group_link = CONFIG["TARGET_GROUP_LINK"]
-            USER_STATES[user_id].target.message_link = CONFIG["TARGET_MESSAGE_LINK"]
+        if STATE_DATA["target"].get("group_link") and STATE_DATA["target"].get(
+            "message_link"
+        ):
+            chat_identifier, message_id = parse_link(
+                STATE_DATA["target"].get("message_link", "")
+            )
+            USER_STATES[user_id].target.group_link = STATE_DATA["target"].get(
+                "group_link"
+            )
+            USER_STATES[user_id].target.message_link = STATE_DATA["target"].get(
+                "message_link"
+            )
             USER_STATES[user_id].target.chat_identifier = chat_identifier
             USER_STATES[user_id].target.message_id = message_id
     return USER_STATES[user_id]
 
 
 CONFIG = load_config()
-API_ID = int(os.getenv("API_ID", CONFIG.get("API_ID", 0)))
-API_HASH = os.getenv("API_HASH", CONFIG.get("API_HASH", ""))
-LOG_GROUP_ID = int(os.getenv("LOG_GROUP_ID", CONFIG.get("LOG_GROUP_ID", 0) or 0))
+STATE_DATA = load_state()
+API_ID = int(os.getenv("API_ID", 0))
+API_HASH = os.getenv("API_HASH", "")
 OWNER_ID = CONFIG.get("OWNER_ID")
 LOG_GROUP_LINK = CONFIG.get("LOG_GROUP_LINK", "")
-GROUP_MESSAGE_LINK = CONFIG.get("GROUP_MESSAGE_LINK", "")
+PRIMARY_SESSION = CONFIG.get("PRIMARY_SESSION") or os.getenv("PRIMARY_SESSION", "")
 
 if not API_ID or not API_HASH:
-    raise RuntimeError("API_ID and API_HASH must be configured")
+    raise RuntimeError("API_ID and API_HASH must be configured as environment variables")
 
-if not load_session_strings(1):
-    raise RuntimeError("At least one SESSION string or session file is required")
-
-PRIMARY_SESSION = load_session_strings(1)[0][1]
+if not PRIMARY_SESSION:
+    raise RuntimeError("PRIMARY_SESSION must be configured for the bootstrap account")
 
 # ----------------------
 # Utilities
@@ -362,7 +421,7 @@ async def validate_target_with_sessions(
 
 
 async def run_reporting_flow(
-    state: ConversationState, panel_chat: int, client: Client
+    state: ConversationState, panel_chat: Optional[int], client: Client
 ) -> None:
     state.mode = "reporting"
     state.paused = False
@@ -455,47 +514,48 @@ def resolve_reason_class(key: str) -> types.TypeInputReportReason:
 
 
 def reason_from_config() -> types.TypeInputReportReason:
-    configured_reason = os.getenv("REPORT_REASON", CONFIG.get("REPORT_REASON"))
-    if configured_reason:
-        normalized = str(configured_reason).strip().lower()
-        if normalized in REASON_MAP:
-            return REASON_MAP[normalized]()
-
-    legacy_mapping = {
-        "REPORT_REASON_CHILD_ABUSE": types.InputReportReasonChildAbuse,
-        "REPORT_REASON_VIOLENCE": types.InputReportReasonViolence,
-        "REPORT_REASON_ILLEGAL_GOODS": types.InputReportReasonIllegalDrugs,
-        "REPORT_REASON_ILLEGAL_ADULT": types.InputReportReasonPornography,
-        "REPORT_REASON_PERSONAL_DATA": types.InputReportReasonPersonalDetails,
-        "REPORT_REASON_SCAM": types.InputReportReasonSpam,
-        "REPORT_REASON_COPYRIGHT": types.InputReportReasonCopyright,
-        "REPORT_REASON_SPAM": types.InputReportReasonSpam,
-        "REPORT_REASON_OTHER": types.InputReportReasonOther,
-    }
-    for key, cls in legacy_mapping.items():
-        val = os.getenv(key, str(CONFIG.get(key, "false"))).lower()
-        if val == "true":
-            return cls()
+    configured_reason = STATE_DATA["report"].get("reason", "other")
+    normalized = str(configured_reason).strip().lower()
+    if normalized in REASON_MAP:
+        return REASON_MAP[normalized]()
     return types.InputReportReasonOther()
 
 
 REPORT_REASON = reason_from_config()
-REPORT_TEXT = os.getenv("REPORT_TEXT", CONFIG.get("REPORT_TEXT", ""))
+REPORT_TEXT = STATE_DATA["report"].get("text", "")
+
+
+async def resolve_log_group_id(client: Client) -> Optional[int]:
+    if STATE_DATA.get("log_group_id"):
+        return STATE_DATA["log_group_id"]
+
+    if not LOG_GROUP_LINK:
+        return None
+
+    try:
+        chat = await client.join_chat(LOG_GROUP_LINK)
+    except UserAlreadyParticipant:
+        chat = await client.get_chat(LOG_GROUP_LINK)
+    except RPCError:
+        return None
+
+    STATE_DATA["log_group_id"] = chat.id
+    save_state(STATE_DATA)
+    return chat.id
 
 
 async def send_log_message(
     client: Client,
-    chat_id: int,
+    chat_id: Optional[int],
     text: str,
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> Optional[int]:
     try:
-        msg = await client.send_message(chat_id, text, reply_markup=reply_markup)
+        target_chat = chat_id or await resolve_log_group_id(client)
+        if target_chat is None:
+            return None
+        msg = await client.send_message(target_chat, text, reply_markup=reply_markup)
         return msg.id
-    except InviteHashExpired:
-        if LOG_GROUP_ID:
-            msg = await client.send_message(LOG_GROUP_ID, text, reply_markup=reply_markup)
-            return msg.id
     except RPCError:
         return None
     return None
@@ -509,10 +569,10 @@ async def edit_log_message(
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
     try:
-        await client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
-    except InviteHashExpired:
-        if LOG_GROUP_ID:
-            await client.edit_message_text(LOG_GROUP_ID, message_id, text, reply_markup=reply_markup)
+        target_chat = chat_id or await resolve_log_group_id(client)
+        if target_chat is None:
+            return
+        await client.edit_message_text(target_chat, message_id, text, reply_markup=reply_markup)
     except RPCError:
         pass
 
@@ -688,9 +748,12 @@ async def handle_run_command(client: Client, message) -> None:
         await message.reply_text("No session strings found to run validation")
         return
 
-    CONFIG["TARGET_GROUP_LINK"] = group_link
-    CONFIG["TARGET_MESSAGE_LINK"] = target_link
-    save_config(CONFIG)
+    state = get_state(message.from_user.id)
+    state.target.group_link = group_link
+    state.target.message_link = target_link
+    state.target.chat_identifier = chat_identifier
+    state.target.message_id = msg_id
+    persist_target(state)
 
     available_sessions = len(sessions)
 
@@ -703,18 +766,14 @@ async def handle_run_command(client: Client, message) -> None:
         f"Requested sessions: {sessions_count}",
         f"Requested count: {requested_count}",
         f"Available sessions: {available_sessions}",
-        f"Configured total reports: {CONFIG.get('TOTAL_REPORTS') or '—'}",
-        f"Report reason: {CONFIG.get('REPORT_REASON') or 'other'}",
-        f"Report text: {REPORT_TEXT or 'Not set'}",
+        f"Configured total reports: {state.report.report_total or '—'}",
+        f"Report reason: {state.report.report_reason_key or 'other'}",
+        f"Report text: {state.report.report_text or 'Not set'}",
     ]
-    if LOG_GROUP_LINK:
-        panel_lines.append(f"Log group link: {LOG_GROUP_LINK}")
-    if GROUP_MESSAGE_LINK:
-        panel_lines.append(f"Group message link: {GROUP_MESSAGE_LINK}")
     panel_lines.append("Status: processing…")
     panel_text = "\n".join(panel_lines)
-    panel_chat = message.chat.id if message.chat else LOG_GROUP_ID
-    panel_id = await send_log_message(client, panel_chat, panel_text)
+    panel_chat = message.chat.id if message.chat else STATE_DATA.get("log_group_id")
+    panel_id = await send_log_message(client, panel_chat or message.chat.id, panel_text)
 
     results: List[str] = []
     reachable = 0
@@ -736,10 +795,9 @@ async def handle_run_command(client: Client, message) -> None:
             f"• Link: {target_link}\n"
             f"• Chat: {chat_identifier} | Message: {msg_id}\n"
             f"• Requested sessions: {sessions_count} | Requested count: {requested_count}\n"
-            f"• Configured total reports: {CONFIG.get('TOTAL_REPORTS') or '—'}\n"
-            f"• Report reason: {CONFIG.get('REPORT_REASON') or 'other'} | Text: {REPORT_TEXT or 'Not set'}\n"
+            f"• Configured total reports: {state.report.report_total or '—'}\n"
+            f"• Report reason: {state.report.report_reason_key or 'other'} | Text: {REPORT_TEXT or 'Not set'}\n"
             + (f"• Log group link: {LOG_GROUP_LINK}\n" if LOG_GROUP_LINK else "")
-            + (f"• Group message link: {GROUP_MESSAGE_LINK}\n" if GROUP_MESSAGE_LINK else "")
             + "\n"
             "**Session results**\n"
             f"• Available sessions: {available_sessions}\n"
@@ -810,7 +868,6 @@ async def handle_set_reason(message) -> None:
         await message.reply_text("❌ Invalid reason. Choose one of: child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other.")
         return
 
-    CONFIG["REPORT_REASON"] = value
     REPORT_REASON = reason_map[value]()
     state = get_state(message.from_user.id)
     state.report.report_reason_key = value
@@ -894,33 +951,28 @@ async def handle_set_total_reports(message) -> None:
 
 
 async def handle_set_links(message) -> None:
-    global LOG_GROUP_LINK, GROUP_MESSAGE_LINK
+    global LOG_GROUP_LINK
     if not owner_required(message):
         await message.reply_text("❌ Only the log group owner can update links.")
         return
 
-    parts = message.text.split(maxsplit=2)
-    if len(parts) != 3:
-        await message.reply_text("Usage: /set_links <log_group_link> <group_message_link>")
+    parts = message.text.split(maxsplit=1)
+    if len(parts) != 2:
+        await message.reply_text("Usage: /set_links <log_group_link>")
         return
 
     log_group_link = parts[1].strip()
-    message_link = parts[2].strip()
 
     if not (log_group_link.startswith("http://") or log_group_link.startswith("https://")):
         await message.reply_text("❌ log_group_link must start with http:// or https://")
         return
 
-    if not (message_link.startswith("http://") or message_link.startswith("https://")):
-        await message.reply_text("❌ group_message_link must start with http:// or https://")
-        return
-
     LOG_GROUP_LINK = log_group_link
-    GROUP_MESSAGE_LINK = message_link
     CONFIG["LOG_GROUP_LINK"] = log_group_link
-    CONFIG["GROUP_MESSAGE_LINK"] = message_link
     save_config(CONFIG)
-    await message.reply_text("✅ Links updated for the review panel.")
+    STATE_DATA["log_group_id"] = None
+    save_state(STATE_DATA)
+    await message.reply_text("✅ Log group link updated. Future panels will use the new group.")
 
 
 async def handle_add_session(message) -> None:
@@ -980,9 +1032,9 @@ async def main():
         state.mode = "idle"
         if not state.target.group_link:
             state.target = TargetContext()
-        state.report.report_text = CONFIG.get("REPORT_TEXT", "")
-        state.report.report_total = CONFIG.get("TOTAL_REPORTS")
-        state.report.report_type = CONFIG.get("REPORT_TYPE", "standard")
+        state.report.report_text = STATE_DATA["report"].get("text", "")
+        state.report.report_total = STATE_DATA["report"].get("total")
+        state.report.report_type = STATE_DATA["report"].get("type", "standard")
         await msg.reply_text(
             "Welcome to the guided reporting panel. Do you want to add new sessions before continuing?",
             reply_markup=add_sessions_prompt_keyboard(),
@@ -1150,7 +1202,9 @@ async def main():
             )
             asyncio.create_task(
                 run_reporting_flow(
-                    state, cq.message.chat.id if cq.message.chat else LOG_GROUP_ID, client
+                    state,
+                    cq.message.chat.id if cq.message.chat else STATE_DATA.get("log_group_id"),
+                    client,
                 )
             )
             await cq.answer()
