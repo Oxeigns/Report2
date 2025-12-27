@@ -1219,7 +1219,7 @@ async def main():
                 if total <= 0:
                     raise ValueError
             except ValueError:
-                await safe_reply_text(msg, "Send a positive integer for the number of reports.")
+                await safe_reply_text(msg, "Btao kitna report karun jisse chud jyega group.")
                 return
             state.report.report_total = total
             if state.quick_start:
@@ -1240,14 +1240,14 @@ async def main():
             else:
                 state.report.report_text = text_value
             state.mode = "idle"
-            await safe_reply_text(msg, "All details captured. Starting reporting…")
+            await safe_reply_text(msg, "All details captured. reporting start kar rha hun bhai…")
             await run_reporting_flow(state, msg.chat.id if msg.chat else None, _)
             state.quick_start = False
             return
 
     await app.start()
     await resolve_log_group_id(app)
-    print("Moderator tool is running...")
+    print("oxygen Bot is running...")
     await asyncio.Event().wait()
 
 
