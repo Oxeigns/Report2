@@ -276,6 +276,9 @@ def format_help() -> str:
     )
 
 
+REPORTING_ENABLED_TEXT = "Reporting is enanled in this build."
+
+
 def format_status(state: ConversationState) -> str:
     target = state.target
     report = state.report
@@ -525,7 +528,8 @@ def resolve_reason_class(key: str) -> InputReportReason:
 
 
 REPORT_REASON = resolve_reason_class(STATE_DATA.get("report_reason", "other"))
-REPORT_TEXT = STATE_DATA.get("report_text", "")
+DEFAULT_REPORT_TEXT = "Please review this content for policy violations."
+REPORT_TEXT = STATE_DATA.get("report_text") or DEFAULT_REPORT_TEXT
 
 
 async def resolve_log_group_id(client: Client) -> Optional[int]:
@@ -751,21 +755,24 @@ def is_sudo(user_id: Optional[int]) -> bool:
 
 
 def resolve_effective_user_id(message) -> Optional[int]:
-    if getattr(message, "chat", None) and getattr(message.chat, "id", None) == STATE_DATA.get(
-        "log_group_id"
-    ):
+    """Best-effort extraction of the human controller behind a message."""
+
+    log_group_id = STATE_DATA.get("log_group_id")
+    chat = getattr(message, "chat", None)
+
+    if chat and getattr(chat, "id", None) == log_group_id:
         return OWNER_ID
+
     if getattr(message, "from_user", None):
         return message.from_user.id
+
+    if getattr(message, "sender_chat", None):
+        if log_group_id and message.sender_chat.id == log_group_id:
+            return OWNER_ID
+
     if getattr(message, "outgoing", False) and OWNER_ID:
         return OWNER_ID
-    if getattr(message, "chat", None) and getattr(message.chat, "id", None) == OWNER_ID:
-        return OWNER_ID
-    if getattr(message, "sender_chat", None) and message.chat and STATE_DATA.get("log_group_id"):
-        if message.sender_chat.id == STATE_DATA.get("log_group_id"):
-            return OWNER_ID
-    if getattr(message, "sender_chat", None) and getattr(message, "outgoing", False) and OWNER_ID:
-        return OWNER_ID
+
     return None
 
 
@@ -786,9 +793,16 @@ async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int]
     state.mode = "reporting"
     state.paused = False
     report_reason = resolve_reason_class(state.report.report_reason_key)
-    report_text = state.report.report_text or REPORT_TEXT
+    report_text = state.report.report_text.strip() or REPORT_TEXT
     sessions = load_session_strings(state.report.session_limit or 0)
     requested_total = state.report.report_total or len(sessions)
+
+    if not sessions:
+        notice = "Reporting is enanled in this build, but no sessions are configured."
+        await send_log_message(client, panel_chat, notice)
+        persist_last_status(notice)
+        state.mode = "idle"
+        return
 
     header = (
         "🛰️ **Live Reporting Panel**\n"
@@ -949,18 +963,24 @@ async def main():
     def unauthorized(msg) -> bool:
         user_id = resolve_effective_user_id(msg)
         if not has_power(user_id):
+            try:
+                asyncio.create_task(safe_reply_text(msg, "Unauthorized."))
+            except Exception:
+                pass
             return True
 
-        # Allow commands from the configured log group as well as direct chats
-        # with the owner/sudo users. Previously, only log-group messages were
-        # processed, which made the client appear unresponsive when using
-        # private control flows.
         if is_log_group_message(msg):
             return False
 
         chat = getattr(msg, "chat", None)
-        if chat and getattr(chat, "type", None) == "private":
-            return True if chat.id is None else False
+        if chat is None:
+            return True
+
+        if getattr(chat, "type", None) == "private":
+            return chat.id is None
+
+        if chat.id == OWNER_ID:
+            return False
 
         return True
 
@@ -985,6 +1005,7 @@ async def main():
             return
         state = get_state(msg.from_user.id)
         await safe_reply_text(msg, format_help())
+        await safe_reply_text(msg, REPORTING_ENABLED_TEXT)
         await safe_reply_text(msg, format_status(state))
 
     @app.on_message(command_filter("help"))
@@ -992,6 +1013,7 @@ async def main():
         if unauthorized(msg):
             return
         await safe_reply_text(msg, format_help())
+        await safe_reply_text(msg, REPORTING_ENABLED_TEXT)
         await safe_reply_text(msg, "If you want to report, add sessions with /add_session or send /send_link <group_link>.")
 
     @app.on_message(command_filter("set_target"))
@@ -1124,6 +1146,7 @@ async def main():
         if state.report.report_total is None:
             await safe_reply_text(msg, "Set report count with /set_total_reports before starting.")
             return
+        await safe_reply_text(msg, REPORTING_ENABLED_TEXT)
         await safe_reply_text(msg, "Reporting started. Progress will appear here or in the log group.")
         await run_reporting_flow(state, msg.chat.id if msg.chat else None, client)
 
