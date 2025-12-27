@@ -16,7 +16,7 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 from pyrogram.raw import functions, types
-from pyrogram.raw.base import InputReportReason
+from pyrogram.raw.types import InputReportReasonSpam
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 CONFIG_PATH = "config.json"
