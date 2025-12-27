@@ -392,6 +392,31 @@ def _wrap_line(line: str, width: int) -> List[str]:
 def format_reply_card(
     title: str, lines: List[str], max_width: int = 60, min_width: int = 28, pad: int = 1
 ) -> str:
+    def _wrap_card_line(text: str, width: int) -> List[str]:
+        if text == "":
+            return [""]
+
+        wrapper = textwrap.TextWrapper(
+            width=width,
+            break_long_words=False,
+            break_on_hyphens=False,
+            replace_whitespace=False,
+            drop_whitespace=False,
+        )
+
+        wrapped_parts = wrapper.wrap(text) or [""]
+        processed: List[str] = []
+
+        for part in wrapped_parts:
+            if len(part) <= width:
+                processed.append(part)
+                continue
+
+            for i in range(0, len(part), width):
+                processed.append(part[i : i + width])
+
+        return processed or [""]
+
     sanitized_title_parts = _sanitize_and_split(title)
     sanitized_body_parts: List[str] = []
     for line in lines:
@@ -404,11 +429,11 @@ def format_reply_card(
 
     title_lines: List[str] = []
     for part in sanitized_title_parts:
-        title_lines.extend(_wrap_line(part, inner_width))
+        title_lines.extend(_wrap_card_line(part, inner_width))
 
     body_lines: List[str] = []
     for part in sanitized_body_parts:
-        body_lines.extend(_wrap_line(part, inner_width))
+        body_lines.extend(_wrap_card_line(part, inner_width))
 
     horizontal = "─" * (inner_width + 2 * pad)
     top = f"┌{horizontal}┐"
