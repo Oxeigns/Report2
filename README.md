@@ -47,7 +47,7 @@ Commands are issued in the configured log group.
 
 - `/help` — show all usage instructions and limits.
 - `/set_owner <telegram_id>` — can be used once when `OWNER_ID` is `null`, or later by the current owner to update ownership.
-- `/run <target_link> <sessions_count> <requested_count>` — runs validation and reporting; **only `OWNER_ID` can execute**.
+- `/run <group_link> <message_link> <sessions_count> <requested_count>` — joins the chat, validates the target, and runs reporting; **only `OWNER_ID` can execute**.
 - `/set_reason <reason>` — update the configured report reason after deployment (owner only).
 - `/set_report_text <text>` — update the report body after deployment (owner only).
 - `/set_total_reports <count>` — update the recorded total reports for the log group (owner only).
@@ -56,7 +56,8 @@ Commands are issued in the configured log group.
 
 ### Input rules for `/run`
 
-- `target_link` must be `https://t.me/<username>/<message_id>` or `https://t.me/c/<internal_id>/<message_id>`.
+- `group_link` must be any valid Telegram group or channel link (public @username or invite such as `https://t.me/+<code>`).
+- `message_link` must be `https://t.me/<username>/<message_id>` or `https://t.me/c/<internal_id>/<message_id>`.
 - `sessions_count` must be an integer between **1** and **100** (how many sessions to test).
 - `requested_count` must be an integer between **1** and **500** (logged for reference).
 
