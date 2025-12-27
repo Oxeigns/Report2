@@ -3,6 +3,12 @@
   "description": "Minimal deployment: supply one bootstrap Telegram session, one log group link for live control, and one permanent owner ID. All further sessions and sudo access are managed after deployment from the log group under the owner/sudo permission model (sudo users are added or removed post-deployment).",
   "repository": "https://github.com/yourusername/auto_reporter",
   "env": {
+    "API_ID": {
+      "description": "Telegram API ID (numeric) from https://my.telegram.org, required for all clients."
+    },
+    "API_HASH": {
+      "description": "Telegram API hash from https://my.telegram.org, required for all clients."
+    },
     "PRIMARY_SESSION": {
       "description": "Single Telegram client session string used to bootstrap the system."
     },
