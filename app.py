@@ -3,7 +3,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from pyrogram import Client, filters
 from pyrogram.errors import (
@@ -16,10 +16,10 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 from pyrogram.raw import functions, types
-from typing import Any
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
+
 InputReportReason = Any
 
-from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
 SESSIONS_DIR = "sessions"
@@ -121,7 +121,6 @@ def load_state() -> Dict:
     with open(STATE_PATH, "r", encoding="utf-8") as f:
         loaded = json.load(f)
 
-    # Merge defaults to stay backward compatible
     for key, value in default_state.items():
         if key not in loaded:
             loaded[key] = value
@@ -179,12 +178,10 @@ def load_session_strings(max_count: int, include_primary: bool = True) -> List[T
     if include_primary and PRIMARY_SESSION:
         sessions.append(("primary", PRIMARY_SESSION))
 
-    # Environment sessions (kept for backward compatibility)
     for key, value in sorted(os.environ.items()):
         if key.startswith("SESSION_") and value.strip():
             sessions.append((key, value.strip()))
 
-    # Session files
     if os.path.isdir(SESSIONS_DIR):
         for filename in sorted(os.listdir(SESSIONS_DIR)):
             path = os.path.join(SESSIONS_DIR, filename)
@@ -203,30 +200,18 @@ def get_state(user_id: int) -> ConversationState:
     if user_id not in USER_STATES:
         USER_STATES[user_id] = ConversationState()
         USER_STATES[user_id].report.report_text = STATE_DATA["report"].get("text", "")
-        USER_STATES[user_id].report.report_reason_key = STATE_DATA["report"].get(
-            "reason", "other"
-        )
+        USER_STATES[user_id].report.report_reason_key = STATE_DATA["report"].get("reason", "other")
         USER_STATES[user_id].report.report_total = STATE_DATA["report"].get("total")
-        USER_STATES[user_id].report.report_type = STATE_DATA["report"].get(
-            "type", "standard"
-        )
-        USER_STATES[user_id].report.session_limit = int(
-            STATE_DATA["report"].get("session_limit") or 0
-        )
-        if STATE_DATA["target"].get("group_link") and STATE_DATA["target"].get(
-            "message_link"
-        ):
-            chat_identifier, message_id = parse_link(
-                STATE_DATA["target"].get("message_link", "")
-            )
-            USER_STATES[user_id].target.group_link = STATE_DATA["target"].get(
-                "group_link"
-            )
-            USER_STATES[user_id].target.message_link = STATE_DATA["target"].get(
-                "message_link"
-            )
+        USER_STATES[user_id].report.report_type = STATE_DATA["report"].get("type", "standard")
+        USER_STATES[user_id].report.session_limit = int(STATE_DATA["report"].get("session_limit") or 0)
+
+        if STATE_DATA["target"].get("group_link") and STATE_DATA["target"].get("message_link"):
+            chat_identifier, message_id = parse_link(STATE_DATA["target"].get("message_link", ""))
+            USER_STATES[user_id].target.group_link = STATE_DATA["target"].get("group_link")
+            USER_STATES[user_id].target.message_link = STATE_DATA["target"].get("message_link")
             USER_STATES[user_id].target.chat_identifier = chat_identifier
             USER_STATES[user_id].target.message_id = message_id
+
     return USER_STATES[user_id]
 
 
@@ -240,9 +225,7 @@ LOG_GROUP_LINK = CONFIG.get("LOG_GROUP_LINK", "")
 PRIMARY_SESSION = CONFIG.get("PRIMARY_SESSION") or os.getenv("PRIMARY_SESSION", "")
 
 if not API_ID or not API_HASH:
-    raise RuntimeError(
-        "API_ID and API_HASH must be configured (set env vars or populate config.json)"
-    )
+    raise RuntimeError("API_ID and API_HASH must be configured (set env vars or populate config.json)")
 
 if not PRIMARY_SESSION:
     raise RuntimeError("PRIMARY_SESSION must be configured for the bootstrap account")
@@ -252,10 +235,10 @@ if OWNER_ID is None:
         "OWNER_ID must be configured via environment variable or config.json and cannot be changed after deployment"
     )
 
+
 # ----------------------
 # Utilities
 # ----------------------
-
 def format_help() -> str:
     return (
         "**Button-driven Telegram Reporting System**\n"
@@ -324,7 +307,9 @@ def reason_keyboard() -> InlineKeyboardMarkup:
     rows = []
     row: List[InlineKeyboardButton] = []
     for idx, key in enumerate(REASON_MAP.keys()):
-        row.append(InlineKeyboardButton(key.replace("_", " ").title(), callback_data=f"reason:{key}"))
+        row.append(
+            InlineKeyboardButton(key.replace("_", " ").title(), callback_data=f"reason:{key}")
+        )
         if len(row) == 2:
             rows.append(row)
             row = []
@@ -384,9 +369,9 @@ def is_valid_group_link(link: str) -> bool:
     if not normalized.startswith(("http://", "https://")):
         return False
     patterns = [
-        r"^https?://t\.me/[A-Za-z0-9_]{3,}$",  # public username links
-        r"^https?://t\.me/\+[A-Za-z0-9_-]+$",  # join links with +
-        r"^https?://t\.me/joinchat/[A-Za-z0-9_-]+$",  # joinchat links
+        r"^https?://t\.me/[A-Za-z0-9_]{3,}$",
+        r"^https?://t\.me/\+[A-Za-z0-9_-]+$",
+        r"^https?://t\.me/joinchat/[A-Za-z0-9_-]+$",
     ]
     return any(re.match(p, normalized) for p in patterns)
 
@@ -475,9 +460,7 @@ async def validate_target_with_sessions(
     return target, notes
 
 
-async def run_reporting_flow(
-    state: ConversationState, panel_chat: Optional[int], client: Client
-) -> None:
+async def run_reporting_flow(state: ConversationState, panel_chat: Optional[int], client: Client) -> None:
     state.mode = "reporting"
     state.paused = False
     report_reason = resolve_reason_class(state.report.report_reason_key)
@@ -494,9 +477,7 @@ async def run_reporting_flow(
         f"Sessions available: {len(sessions)}"
     )
 
-    sent_id = await send_log_message(
-        client, panel_chat, header, reply_markup=live_panel_keyboard(state.paused)
-    )
+    sent_id = await send_log_message(client, panel_chat, header, reply_markup=live_panel_keyboard(state.paused))
     state.last_panel_text = header
     state.live_panel = sent_id
     state.live_panel_chat = panel_chat
@@ -507,6 +488,7 @@ async def run_reporting_flow(
     for session_name, session_str in sessions:
         while state.paused:
             await asyncio.sleep(1)
+
         status, detail = await evaluate_session(
             session_name,
             session_str,
@@ -516,10 +498,12 @@ async def run_reporting_flow(
             reason=report_reason,
             report_text=report_text,
         )
+
         if status == "reachable":
             success += 1
         else:
             failed += 1
+
         details.append(f"• {session_name}: {status} ({detail})")
         panel_text = (
             header
@@ -613,7 +597,6 @@ async def send_log_message(
         return msg.id
     except RPCError:
         return None
-    return None
 
 
 async def edit_log_message(
@@ -637,7 +620,6 @@ async def join_target_chat(
     join_link: str,
     chat_identifier: Union[str, int],
 ) -> Tuple[Optional[object], str]:
-
     normalized = join_link.strip()
     if not normalized.startswith(("http://", "https://")):
         return None, "❌ Group/channel link must start with http:// or https://"
@@ -652,14 +634,14 @@ async def join_target_chat(
         try:
             peer = await client.resolve_peer(chat_identifier)
             return peer, "ℹ️ Already a participant"
-        except RPCError as e:  # pragma: no cover - defensive
-            return None, f"⚠️ Could not confirm membership: {e.MESSAGE or e}"  # type: ignore
+        except RPCError as e:  # pragma: no cover
+            return None, f"⚠️ Could not confirm membership: {e.MESSAGE or e}"  # type: ignore[attr-defined]
     except (InviteHashExpired, InviteHashInvalid):
         return None, "❌ Invite link expired or invalid"
     except (UsernameInvalid, UsernameNotOccupied):
         return None, "❌ Invalid or unknown public group/channel link"
     except RPCError as e:
-        return None, f"❌ Failed to join: {e.MESSAGE or e}"  # type: ignore
+        return None, f"❌ Failed to join: {e.MESSAGE or e}"  # type: ignore[attr-defined]
 
 
 async def evaluate_session(
@@ -682,16 +664,14 @@ async def evaluate_session(
         ) as user_client:
             me = await user_client.get_me()
             try:
-                peer, join_detail = await join_target_chat(
-                    user_client, join_link, target
-                )
+                peer, join_detail = await join_target_chat(user_client, join_link, target)
                 if not peer:
                     return "invalid", f"Join failed: {join_detail}"
 
                 try:
                     msg = await user_client.get_messages(target, message_id)
                 except RPCError as e:
-                    return "inaccessible", f"Message error: {e.MESSAGE or e}"  # type: ignore
+                    return "inaccessible", f"Message error: {e.MESSAGE or e}"  # type: ignore[attr-defined]
 
                 await user_client.invoke(
                     functions.messages.Report(
@@ -706,12 +686,12 @@ async def evaluate_session(
                 await asyncio.sleep(e.value)
                 return "floodwait", f"FloodWait {e.value}s"
             except RPCError as e:
-                return "inaccessible", f"RPC error: {e.MESSAGE or e}"  # type: ignore
+                return "inaccessible", f"RPC error: {e.MESSAGE or e}"  # type: ignore[attr-defined]
     except RPCError as e:
         if isinstance(e, FloodWait):
             await asyncio.sleep(e.value)
             return "floodwait", f"FloodWait {e.value}s"
-        return "invalid", f"Session error: {e.MESSAGE or e}"  # type: ignore
+        return "invalid", f"Session error: {e.MESSAGE or e}"  # type: ignore[attr-defined]
     except Exception as e:  # noqa: BLE001
         return "invalid", f"Unexpected: {e}"
 
@@ -724,7 +704,6 @@ async def validate_session_access(
     message_id: int,
 ) -> Tuple[str, str, Optional[str], Optional[str]]:
     """Join and fetch the message without reporting to confirm accessibility."""
-
     try:
         async with Client(
             name=f"validate_{session_name}",
@@ -742,14 +721,14 @@ async def validate_session_access(
                 preview = preview[:120] + ("…" if len(preview) > 120 else "") if preview else None
                 return "reachable", f"{join_detail}", msg.chat.title or msg.chat.first_name, preview
             except RPCError as e:
-                return "inaccessible", f"Message error: {e.MESSAGE or e}", None, None  # type: ignore
+                return "inaccessible", f"Message error: {e.MESSAGE or e}", None, None  # type: ignore[attr-defined]
     except UserAlreadyParticipant:
         return "reachable", "Already joined", None, None
     except FloodWait as e:
         await asyncio.sleep(e.value)
         return "floodwait", f"FloodWait {e.value}s", None, None
     except RPCError as e:
-        return "invalid", f"RPC error: {e.MESSAGE or e}", None, None  # type: ignore
+        return "invalid", f"RPC error: {e.MESSAGE or e}", None, None  # type: ignore[attr-defined]
     except Exception as e:  # noqa: BLE001
         return "invalid", f"Unexpected: {e}", None, None
 
@@ -762,9 +741,7 @@ async def handle_run_command(client: Client, message) -> None:
 
     parts = message.text.split()
     if len(parts) != 5:
-        await message.reply_text(
-            "Usage: /run <group_link> <message_link> <sessions_count> <requested_count>"
-        )
+        await message.reply_text("Usage: /run <group_link> <message_link> <sessions_count> <requested_count>")
         return
 
     _, group_link, target_link, sessions_count_raw, requested_count_raw = parts
@@ -836,9 +813,7 @@ async def handle_run_command(client: Client, message) -> None:
     processed = 0
 
     for session_name, session_str in sessions:
-        status, detail = await evaluate_session(
-            session_name, session_str, group_link, chat_identifier, msg_id
-        )
+        status, detail = await evaluate_session(session_name, session_str, group_link, chat_identifier, msg_id)
         processed += 1
         if status == "reachable":
             reachable += 1
@@ -868,9 +843,7 @@ async def handle_run_command(client: Client, message) -> None:
 
 
 async def handle_set_owner(client: Client, message) -> None:
-    await message.reply_text(
-        f"🔒 Owner is locked to `{OWNER_ID}` and cannot be changed after deployment."
-    )
+    await message.reply_text(f"🔒 Owner is locked to `{OWNER_ID}` and cannot be changed after deployment.")
 
 
 def is_owner(user_id: Optional[int]) -> bool:
@@ -897,7 +870,9 @@ async def handle_set_reason(message) -> None:
 
     parts = message.text.split(maxsplit=1)
     if len(parts) != 2:
-        await message.reply_text("Usage: /set_reason <child_abuse|violence|illegal_goods|illegal_adult|personal_data|scam|copyright|spam|other>")
+        await message.reply_text(
+            "Usage: /set_reason <child_abuse|violence|illegal_goods|illegal_adult|personal_data|scam|copyright|spam|other>"
+        )
         return
 
     value = parts[1].strip().lower()
@@ -914,7 +889,9 @@ async def handle_set_reason(message) -> None:
     }
 
     if value not in reason_map:
-        await message.reply_text("❌ Invalid reason. Choose one of: child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other.")
+        await message.reply_text(
+            "❌ Invalid reason. Choose one of: child_abuse, violence, illegal_goods, illegal_adult, personal_data, scam, copyright, spam, other."
+        )
         return
 
     REPORT_REASON = reason_map[value]()
@@ -947,15 +924,11 @@ async def start_target_prompt(message, state: ConversationState) -> None:
     state.mode = "awaiting_group_link"
     await message.reply_text(
         "Send the **group or channel link** to target (accepts https://t.me/username, https://t.me/+invite, or https://t.me/joinchat/invite).",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-        ),
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
     )
 
 
-async def confirm_target_and_configure(
-    message, state: ConversationState, validation_notes: List[str]
-) -> None:
+async def confirm_target_and_configure(message, state: ConversationState, validation_notes: List[str]) -> None:
     summary = format_target_summary(state)
     summary += "\n\n" + "\n".join(validation_notes)
     await message.reply_text(summary, reply_markup=target_keyboard())
@@ -993,6 +966,7 @@ async def handle_set_total_reports(message) -> None:
     if total_reports < 0:
         await message.reply_text("❌ total_reports cannot be negative.")
         return
+
     state = get_state(message.from_user.id)
     state.report.report_total = total_reports
     persist_report_settings(state)
@@ -1038,7 +1012,9 @@ async def handle_add_session(message) -> None:
     session_str = parts[2].strip()
 
     if not name or not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
-        await message.reply_text("❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens).")
+        await message.reply_text(
+            "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens)."
+        )
         return
 
     if len(session_str) < 10:
@@ -1151,9 +1127,7 @@ async def main():
             state.pending_sudo_action = "add"
             await cq.message.reply_text(
                 "Send the sudo user as an ID, @username, or forward a message from them.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
             await cq.answer()
             return
@@ -1167,14 +1141,9 @@ async def main():
                 await cq.message.reply_text("No sudo users configured.")
                 await cq.answer()
                 return
-            rows = [
-                [InlineKeyboardButton(str(uid), callback_data=f"sudo_remove:{uid}")]
-                for uid in sudo_ids
-            ]
+            rows = [[InlineKeyboardButton(str(uid), callback_data=f"sudo_remove:{uid}")] for uid in sudo_ids]
             rows.append([InlineKeyboardButton("⬅️ Back", callback_data="manage_sudo")])
-            await cq.message.reply_text(
-                "Select a sudo user to remove.", reply_markup=InlineKeyboardMarkup(rows)
-            )
+            await cq.message.reply_text("Select a sudo user to remove.", reply_markup=InlineKeyboardMarkup(rows))
             await cq.answer()
             return
 
@@ -1186,9 +1155,7 @@ async def main():
             if not sudo_ids:
                 await cq.message.reply_text("No sudo users configured.")
             else:
-                await cq.message.reply_text(
-                    "Current sudo users:\n" + "\n".join(f"• {uid}" for uid in sudo_ids)
-                )
+                await cq.message.reply_text("Current sudo users:\n" + "\n".join(f"• {uid}" for uid in sudo_ids))
             await cq.answer()
             return
 
@@ -1216,10 +1183,7 @@ async def main():
             return
 
         if data == "add_sessions_prompt":
-            await cq.message.reply_text(
-                "Do you want to add new sessions now?",
-                reply_markup=add_sessions_prompt_keyboard(),
-            )
+            await cq.message.reply_text("Do you want to add new sessions now?", reply_markup=add_sessions_prompt_keyboard())
             await cq.answer()
             return
 
@@ -1227,9 +1191,7 @@ async def main():
             state.mode = "awaiting_session_name"
             await cq.message.reply_text(
                 "Send a session name (letters/numbers/underscore). After that, send the session string.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
             await cq.answer()
             return
@@ -1281,9 +1243,7 @@ async def main():
             state.report.report_type = key.replace("_", " ").title()
             REPORT_REASON = resolve_reason_class(key)
             persist_report_settings(state)
-            await cq.message.reply_text(
-                f"✅ Reason updated to {key}.", reply_markup=configuration_keyboard(state)
-            )
+            await cq.message.reply_text(f"✅ Reason updated to {key}.", reply_markup=configuration_keyboard(state))
             await cq.answer("Reason updated")
             return
 
@@ -1291,9 +1251,7 @@ async def main():
             state.mode = "awaiting_report_text"
             await cq.message.reply_text(
                 "Send the new report text/message body.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
             await cq.answer()
             return
@@ -1302,9 +1260,7 @@ async def main():
             state.mode = "awaiting_report_total"
             await cq.message.reply_text(
                 "Send the new total number of reports to log (integer).",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
             await cq.answer()
             return
@@ -1326,9 +1282,7 @@ async def main():
                 return
             state.target = target
             persist_target(state)
-            await cq.message.reply_text(
-                "Starting live reporting…", reply_markup=live_panel_keyboard()
-            )
+            await cq.message.reply_text("Starting live reporting…", reply_markup=live_panel_keyboard())
             asyncio.create_task(
                 run_reporting_flow(
                     state,
@@ -1353,7 +1307,21 @@ async def main():
                     reply_markup=live_panel_keyboard(state.paused),
                 )
 
-    @app.on_message(~filters.command(["start", "help", "set_owner", "run", "set_reason", "set_report_text", "set_total_reports", "set_links", "add_session"]))
+    @app.on_message(
+        ~filters.command(
+            [
+                "start",
+                "help",
+                "set_owner",
+                "run",
+                "set_reason",
+                "set_report_text",
+                "set_total_reports",
+                "set_links",
+                "add_session",
+            ]
+        )
+    )
     async def _stateful(_, msg):
         if not msg.from_user:
             return
@@ -1383,10 +1351,7 @@ async def main():
                 return
             sudo_ids = STATE_DATA.get("sudo_user_ids", [])
             if user_id in sudo_ids:
-                await msg.reply_text(
-                    f"ℹ️ `{user_id}` is already a sudo user.",
-                    reply_markup=sudo_management_keyboard(),
-                )
+                await msg.reply_text(f"ℹ️ `{user_id}` is already a sudo user.", reply_markup=sudo_management_keyboard())
             else:
                 sudo_ids.append(user_id)
                 persist_sudo_users(sudo_ids)
@@ -1399,7 +1364,7 @@ async def main():
             return
 
         if state.mode == "awaiting_session_name":
-            name = msg.text.strip()
+            name = (msg.text or "").strip()
             if not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
                 await msg.reply_text(
                     "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens)."
@@ -1409,9 +1374,7 @@ async def main():
             state.mode = "awaiting_session_value"
             await msg.reply_text(
                 f"Send the session string for `{name}`.",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
             return
 
@@ -1421,7 +1384,7 @@ async def main():
                 state.mode = "idle"
                 await msg.reply_text("Session flow reset. Start again from /start.")
                 return
-            session_str = msg.text.strip()
+            session_str = (msg.text or "").strip()
             if len(session_str) < 10:
                 await msg.reply_text("❌ Session string looks too short. Please provide a valid session string.")
                 return
@@ -1438,27 +1401,23 @@ async def main():
             return
 
         if state.mode == "awaiting_group_link":
-            link = msg.text.strip()
+            link = (msg.text or "").strip()
             if not is_valid_group_link(link):
                 await msg.reply_text(
                     "❌ Invalid group/channel link. Provide a valid https://t.me invite or @username link.",
-                    reply_markup=InlineKeyboardMarkup(
-                        [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                    ),
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
                 )
                 return
             state.target.group_link = link
             state.mode = "awaiting_message_link"
             await msg.reply_text(
                 "Great. Now send the target **message link** (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
-                reply_markup=InlineKeyboardMarkup(
-                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
-                ),
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Cancel", callback_data="back_home")]]),
             )
             return
 
         if state.mode == "awaiting_message_link":
-            message_link = msg.text.strip()
+            message_link = (msg.text or "").strip()
             chat_identifier, msg_id = parse_link(message_link)
             if chat_identifier is None or msg_id is None:
                 await msg.reply_text(
@@ -1483,39 +1442,34 @@ async def main():
             await confirm_target_and_configure(msg, state, notes)
             return
 
-    if state.mode == "awaiting_report_text":
-        global REPORT_TEXT
-        text = msg.text.strip()
-        state.report.report_text = text
-        REPORT_TEXT = text
-        persist_report_settings(state)
-        state.mode = "idle"
-        await msg.reply_text(
-            "✅ Report text updated.", reply_markup=configuration_keyboard(state)
-        )
-        return
-
-    if state.mode == "awaiting_report_total":
-        try:
-            total = int(msg.text.strip())
-            if total < 0:
-                raise ValueError
-        except ValueError:
-            await msg.reply_text("❌ Please send a non-negative integer.")
+        if state.mode == "awaiting_report_text":
+            global REPORT_TEXT
+            text = (msg.text or "").strip()
+            state.report.report_text = text
+            REPORT_TEXT = text
+            persist_report_settings(state)
+            state.mode = "idle"
+            await msg.reply_text("✅ Report text updated.", reply_markup=configuration_keyboard(state))
             return
-        state.report.report_total = total
-        persist_report_settings(state)
-        state.mode = "idle"
-        await msg.reply_text(
-            f"✅ Total reports updated to {total}.",
-            reply_markup=configuration_keyboard(state),
-        )
-        return
 
-    await msg.reply_text(
-        "Use the buttons from /start to navigate the guided flow.",
-        reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
-    )
+        if state.mode == "awaiting_report_total":
+            try:
+                total = int((msg.text or "").strip())
+                if total < 0:
+                    raise ValueError
+            except ValueError:
+                await msg.reply_text("❌ Please send a non-negative integer.")
+                return
+            state.report.report_total = total
+            persist_report_settings(state)
+            state.mode = "idle"
+            await msg.reply_text(f"✅ Total reports updated to {total}.", reply_markup=configuration_keyboard(state))
+            return
+
+        await msg.reply_text(
+            "Use the buttons from /start to navigate the guided flow.",
+            reply_markup=start_keyboard(is_owner=is_owner(msg.from_user.id)),
+        )
 
     await app.start()
     print("Moderator tool is running...")
@@ -1527,5 +1481,3 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         pass
-
-
