@@ -1,17 +1,19 @@
 {
-  "name": "Telegram Multi-Session Reporter",
-  "description": "Report Telegram messages using multiple user sessions automatically.",
+  "name": "Telegram Minimal Reporter",
+  "description": "Minimal deployment: supply one bootstrap Telegram session, one log group link for live control, and one permanent owner ID. All further sessions and sudo access are managed after deployment from the log group under the owner/sudo permission model (sudo users are added or removed post-deployment).",
   "repository": "https://github.com/yourusername/auto_reporter",
   "env": {
-    "API_ID": { "description": "Your Telegram API ID" },
-    "API_HASH": { "description": "Your Telegram API HASH" },
-    "NUMBER_OF_REPORTS": { "description": "How many reports to send", "value": "500" },
-    "SESSION_1": { "description": "Pyrogram session string 1" },
-    "SESSION_2": { "description": "Pyrogram session string 2 (optional)" },
-    "SESSION_3": { "description": "Pyrogram session string 3 (optional)" },
-    "CHANNEL_LINK": { "description": "Telegram channel/group link" },
-    "MESSAGE_LINK": { "description": "Telegram message link" },
-    "REPORT_TEXT": { "description": "Why are you reporting this content", "value": "Illegal content detected" }
+    "PRIMARY_SESSION": {
+      "description": "Single Telegram client session string used to bootstrap the system."
+    },
+    "LOG_GROUP_LINK": {
+      "description": "Telegram log group link for logs, live panels, and post-deployment controls."
+    },
+    "OWNER_ID": {
+      "description": "Telegram user ID of the permanent owner who manages sudo users after deployment."
+    }
   },
-  "buildpacks": [{ "url": "heroku/python" }]
+  "buildpacks": [
+    { "url": "heroku/python" }
+  ]
 }
