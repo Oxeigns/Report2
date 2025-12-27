@@ -33,15 +33,15 @@ Update `config.json` with your credentials:
 }
 ```
 
-Set the report reason flags so that exactly one is `true`. You must also provide session strings via environment variables (`SESSION_1`, `SESSION_2`, …) or files inside a `sessions/` directory. The first session is used to run the command listener; additional sessions are used for validation.
+Set the report reason flags so that exactly one is `true`. You must also provide session strings via environment variables (`SESSION_1`, `SESSION_2`, …) or files inside a `sessions/` directory. The first session is used to run the command listener; additional sessions are used for validation. `OWNER_ID` controls who can trigger `/run`; set it with `/set_owner` once the bot is running.
 
 ## Usage
 
 Commands are issued in the configured log group.
 
-- `/help` — show all usage instructions.
+- `/help` — show all usage instructions and limits.
 - `/set_owner <telegram_id>` — can be used once when `OWNER_ID` is `null`, or later by the current owner to update ownership.
-- `/run <target_link> <sessions_count> <requested_count>` — runs validation and reporting.
+- `/run <target_link> <sessions_count> <requested_count>` — runs validation and reporting; **only `OWNER_ID` can execute**.
 
 ### Input rules for `/run`
 
@@ -49,7 +49,7 @@ Commands are issued in the configured log group.
 - `sessions_count` must be an integer between **1** and **100** (how many sessions to test).
 - `requested_count` must be an integer between **1** and **500** (logged for reference).
 
-If any validation fails, the bot returns a clear error instead of running.
+If any validation fails, the bot returns a clear error instead of running. Invalid links, out-of-range limits, or unauthorized users are rejected with explanations.
 
 ### Review panel
 
@@ -58,8 +58,8 @@ When `/run` is executed by the owner, the tool:
 1. Iterates through the available sessions (up to `sessions_count`).
 2. For each session, connects, validates with `get_me()`, fetches the target message, and attempts `functions.messages.Report`.
 3. Logs the accessibility result (reachable, inaccessible, floodwait, invalid) in the log group.
-4. Edits a live **Review Panel** message with target link, parsed chat/message IDs, requested counts, validated session totals, reachable totals, and per-session errors.
-
+4. Edits a live **Review Panel** message with target link, parsed chat/message IDs, requested counts, available sessions, validated session totals, reachable totals, and per-session errors.
+ 
 FloodWaits are handled automatically with pauses, and if the log group invite link expires the tool falls back to `LOG_GROUP_ID` when possible.
 
 ## Safety Notice
