@@ -633,9 +633,15 @@ def is_sudo(user_id: Optional[int]) -> bool:
 def resolve_effective_user_id(message) -> Optional[int]:
     if getattr(message, "from_user", None):
         return message.from_user.id
+    if getattr(message, "outgoing", False) and OWNER_ID:
+        return OWNER_ID
+    if getattr(message, "chat", None) and getattr(message.chat, "id", None) == OWNER_ID:
+        return OWNER_ID
     if getattr(message, "sender_chat", None) and message.chat and STATE_DATA.get("log_group_id"):
         if message.sender_chat.id == STATE_DATA.get("log_group_id"):
             return OWNER_ID
+    if getattr(message, "sender_chat", None) and getattr(message, "outgoing", False) and OWNER_ID:
+        return OWNER_ID
     return None
 
 
@@ -802,6 +808,13 @@ async def main():
         session_string=PRIMARY_SESSION,
     )
 
+    debug_updates = os.getenv("DEBUG_UPDATES", "").lower() in {"1", "true", "yes"}
+
+    command_scope = filters.me | filters.private | filters.group
+
+    def command_filter(name: str):
+        return filters.command(name) & command_scope
+
     def unauthorized(msg) -> bool:
         user_id = resolve_effective_user_id(msg)
         if not has_power(user_id):
@@ -809,7 +822,22 @@ async def main():
             return True
         return False
 
-    @app.on_message(filters.command("start"))
+    if debug_updates:
+        @app.on_message(filters.all, group=-1)
+        async def _log_updates(_, msg):
+            print(
+                "[update] incoming=%s outgoing=%s chat=%s from_user=%s sender_chat=%s text=%s"
+                % (
+                    getattr(msg, "incoming", None),
+                    getattr(msg, "outgoing", None),
+                    getattr(msg.chat, "id", None) if getattr(msg, "chat", None) else None,
+                    getattr(getattr(msg, "from_user", None), "id", None),
+                    getattr(getattr(msg, "sender_chat", None), "id", None),
+                    (msg.text or msg.caption or "").strip()[:80],
+                )
+            )
+
+    @app.on_message(command_filter("start"))
     async def _start(_, msg):
         if unauthorized(msg):
             return
@@ -817,14 +845,14 @@ async def main():
         await safe_reply_text(msg, format_help())
         await safe_reply_text(msg, format_status(state))
 
-    @app.on_message(filters.command("help"))
+    @app.on_message(command_filter("help"))
     async def _help(_, msg):
         if unauthorized(msg):
             return
         await safe_reply_text(msg, format_help())
         await safe_reply_text(msg, "If you want to report, add sessions with /add_session or send /send_link <group_link>.")
 
-    @app.on_message(filters.command("set_target"))
+    @app.on_message(command_filter("set_target"))
     async def _set_target(_, msg):
         if unauthorized(msg):
             return
@@ -845,7 +873,7 @@ async def main():
             "Group link saved. Send the target message link (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
         )
 
-    @app.on_message(filters.command("send_link"))
+    @app.on_message(command_filter("send_link"))
     async def _send_link(_, msg):
         if unauthorized(msg):
             return
@@ -863,7 +891,7 @@ async def main():
         state.quick_start = True
         await safe_reply_text(msg, "Send the target message link for quick reporting.")
 
-    @app.on_message(filters.command("session_limit"))
+    @app.on_message(command_filter("session_limit"))
     async def _session_limit(_, msg):
         if unauthorized(msg):
             return
@@ -883,34 +911,34 @@ async def main():
         persist_session_limit(value)
         await safe_reply_text(msg, f"Session limit set to {value or 'all'}.")
 
-    @app.on_message(filters.command("add_session"))
+    @app.on_message(command_filter("add_session"))
     async def _add_session_handler(_, msg):
         if unauthorized(msg):
             return
         await handle_add_session(msg)
 
-    @app.on_message(filters.command("set_reason"))
+    @app.on_message(command_filter("set_reason"))
     async def _set_reason(_, msg):
         if unauthorized(msg):
             return
         state = get_state(msg.from_user.id)
         await handle_set_reason(msg, state)
 
-    @app.on_message(filters.command("set_report_text"))
+    @app.on_message(command_filter("set_report_text"))
     async def _set_report_text(_, msg):
         if unauthorized(msg):
             return
         state = get_state(msg.from_user.id)
         await handle_set_report_text(msg, state)
 
-    @app.on_message(filters.command("set_total_reports"))
+    @app.on_message(command_filter("set_total_reports"))
     async def _set_total_reports(_, msg):
         if unauthorized(msg):
             return
         state = get_state(msg.from_user.id)
         await handle_set_total_reports(msg, state)
 
-    @app.on_message(filters.command("pause"))
+    @app.on_message(command_filter("pause"))
     async def _pause(_, msg):
         if unauthorized(msg):
             return
@@ -918,7 +946,7 @@ async def main():
         state.paused = True
         await safe_reply_text(msg, "Reporting paused. Use /resume to continue or /start_report to restart.")
 
-    @app.on_message(filters.command("resume"))
+    @app.on_message(command_filter("resume"))
     async def _resume(_, msg):
         if unauthorized(msg):
             return
@@ -926,14 +954,14 @@ async def main():
         state.paused = False
         await safe_reply_text(msg, "Reporting resumed. Use /start_report to relaunch if needed.")
 
-    @app.on_message(filters.command("status"))
+    @app.on_message(command_filter("status"))
     async def _status(_, msg):
         if unauthorized(msg):
             return
         state = get_state(msg.from_user.id)
         await safe_reply_text(msg, format_status(state))
 
-    @app.on_message(filters.command("cancel"))
+    @app.on_message(command_filter("cancel"))
     async def _cancel(_, msg):
         if unauthorized(msg):
             return
@@ -943,7 +971,7 @@ async def main():
         state.quick_start = False
         await safe_reply_text(msg, "All pending actions cancelled.")
 
-    @app.on_message(filters.command("start_report"))
+    @app.on_message(command_filter("start_report"))
     async def _start_report(client, msg):
         if unauthorized(msg):
             return
@@ -957,7 +985,7 @@ async def main():
         await safe_reply_text(msg, "Reporting started. Progress will appear here or in the log group.")
         await run_reporting_flow(state, msg.chat.id if msg.chat else None, client)
 
-    @app.on_message(filters.text & ~filters.command([]))
+    @app.on_message(filters.text & ~filters.command([]) & command_scope)
     async def _message_handler(_, msg):
         if unauthorized(msg):
             return
