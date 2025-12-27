@@ -2,7 +2,7 @@ import asyncio
 import json
 import os
 import re
-import time
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple, Union
 
 from pyrogram import Client, filters
@@ -16,9 +16,46 @@ from pyrogram.errors import (
     UsernameNotOccupied,
 )
 from pyrogram.raw import functions, types
+from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
 CONFIG_PATH = "config.json"
 SESSIONS_DIR = "sessions"
+
+
+@dataclass
+class TargetContext:
+    group_link: Optional[str] = None
+    message_link: Optional[str] = None
+    chat_identifier: Optional[Union[str, int]] = None
+    message_id: Optional[int] = None
+    chat_title: Optional[str] = None
+    message_preview: Optional[str] = None
+    active_sessions: int = 0
+    validation_notes: List[str] = field(default_factory=list)
+
+
+@dataclass
+class ReportSettings:
+    report_type: str = "standard"
+    report_reason_key: str = "other"
+    report_text: str = ""
+    report_total: Optional[int] = None
+    session_limit: int = 0
+
+
+@dataclass
+class ConversationState:
+    mode: str = "idle"
+    target: TargetContext = field(default_factory=TargetContext)
+    report: ReportSettings = field(default_factory=ReportSettings)
+    paused: bool = False
+    live_panel: Optional[int] = None
+    live_panel_chat: Optional[int] = None
+    pending_session_name: Optional[str] = None
+    last_panel_text: str = ""
+
+
+USER_STATES: Dict[int, ConversationState] = {}
 
 
 # ----------------------
@@ -72,6 +109,17 @@ def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
     return sessions
 
 
+def get_state(user_id: int) -> ConversationState:
+    if user_id not in USER_STATES:
+        USER_STATES[user_id] = ConversationState()
+        USER_STATES[user_id].report.report_text = CONFIG.get("REPORT_TEXT", "")
+        USER_STATES[user_id].report.report_reason_key = (
+            CONFIG.get("REPORT_REASON") or "other"
+        )
+        USER_STATES[user_id].report.report_total = CONFIG.get("TOTAL_REPORTS")
+    return USER_STATES[user_id]
+
+
 CONFIG = load_config()
 API_ID = int(os.getenv("API_ID", CONFIG.get("API_ID", 0)))
 API_HASH = os.getenv("API_HASH", CONFIG.get("API_HASH", ""))
@@ -116,6 +164,70 @@ def format_help() -> str:
     )
 
 
+def start_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [
+                InlineKeyboardButton("➕ Add Sessions", callback_data="add_sessions"),
+                InlineKeyboardButton("🎯 Set Target", callback_data="setup_target"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Settings", callback_data="configure"),
+                InlineKeyboardButton("ℹ️ Help", callback_data="show_help"),
+            ],
+        ]
+    )
+
+
+def configuration_keyboard(state: ConversationState) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔄 Change report type", callback_data="choose_type")],
+            [InlineKeyboardButton("📝 Change reason text", callback_data="change_text")],
+            [InlineKeyboardButton("#️⃣ Change total reports", callback_data="change_total")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="back_home")],
+        ]
+    )
+
+
+def reason_keyboard() -> InlineKeyboardMarkup:
+    rows = []
+    row: List[InlineKeyboardButton] = []
+    for idx, key in enumerate(REASON_MAP.keys()):
+        row.append(InlineKeyboardButton(key.replace("_", " ").title(), callback_data=f"reason:{key}"))
+        if len(row) == 2:
+            rows.append(row)
+            row = []
+    if row:
+        rows.append(row)
+    rows.append([InlineKeyboardButton("⬅️ Back", callback_data="configure")])
+    return InlineKeyboardMarkup(rows)
+
+
+def target_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        [
+            [InlineKeyboardButton("🔁 Restart target setup", callback_data="setup_target")],
+            [InlineKeyboardButton("🚀 Start reporting", callback_data="begin_report")],
+            [InlineKeyboardButton("⬅️ Home", callback_data="back_home")],
+        ]
+    )
+
+
+def live_panel_keyboard(paused: bool = False) -> InlineKeyboardMarkup:
+    toggle = InlineKeyboardButton("▶️ Resume" if paused else "⏸ Pause", callback_data="toggle_pause")
+    return InlineKeyboardMarkup(
+        [
+            [toggle, InlineKeyboardButton("🆕 New report", callback_data="begin_report")],
+            [
+                InlineKeyboardButton("➕ Add sessions", callback_data="add_sessions"),
+                InlineKeyboardButton("🎯 Change target", callback_data="setup_target"),
+            ],
+            [InlineKeyboardButton("⬅️ Home", callback_data="back_home")],
+        ]
+    )
+
+
 def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     link = link.strip()
     pattern_username = r"^https?://t\.me/([A-Za-z0-9_]+)/([0-9]+)$"
@@ -137,24 +249,179 @@ def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     return None, None
 
 
-def reason_from_config() -> types.TypeInputReportReason:
-    mapping = {
-        "child_abuse": types.InputReportReasonChildAbuse,
-        "violence": types.InputReportReasonViolence,
-        "illegal_goods": types.InputReportReasonIllegalDrugs,
-        "illegal_adult": types.InputReportReasonPornography,
-        "personal_data": types.InputReportReasonPersonalDetails,
-        "scam": types.InputReportReasonSpam,
-        "copyright": types.InputReportReasonCopyright,
-        "spam": types.InputReportReasonSpam,
-        "other": types.InputReportReasonOther,
-    }
+def is_valid_group_link(link: str) -> bool:
+    normalized = link.strip()
+    if not normalized.startswith(("http://", "https://")):
+        return False
+    return bool(re.match(r"^https?://t\.me/[A-Za-z0-9_+/-]+$", normalized))
 
+
+def format_target_summary(state: ConversationState) -> str:
+    target = state.target
+    report = state.report
+    return (
+        "🎯 **Target confirmed**\n"
+        f"• Group/channel: {target.chat_title or 'Unknown'}\n"
+        f"• Link: {target.group_link}\n"
+        f"• Message: {target.message_link} (ID {target.message_id})\n"
+        f"• Preview: {(target.message_preview or 'Not available')}\n"
+        f"• Active sessions: {target.active_sessions}\n\n"
+        "**Report configuration**\n"
+        f"• Type: {report.report_type}\n"
+        f"• Reason key: {report.report_reason_key}\n"
+        f"• Text: {report.report_text or 'Not set'}\n"
+        f"• Requested reports: {report.report_total or 'Not set'}\n"
+        f"• Session limit: {report.session_limit or target.active_sessions}\n"
+        "\nUse the buttons to start reporting or change the target."
+    )
+
+
+async def validate_target_with_sessions(
+    group_link: str, message_link: str, session_limit: int
+) -> Tuple[Optional[TargetContext], List[str]]:
+    chat_identifier, message_id = parse_link(message_link)
+    if chat_identifier is None or message_id is None:
+        return None, [
+            "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>",
+        ]
+
+    sessions = load_session_strings(session_limit or 0)
+    if not sessions:
+        return None, ["❌ No session strings are configured."]
+
+    notes: List[str] = []
+    title: Optional[str] = None
+    preview: Optional[str] = None
+    successes = 0
+
+    for session_name, session_str in sessions:
+        status, detail, maybe_title, maybe_preview = await validate_session_access(
+            session_name, session_str, group_link, chat_identifier, message_id
+        )
+        if maybe_title:
+            title = maybe_title
+        if maybe_preview:
+            preview = maybe_preview
+        notes.append(f"• {session_name}: {status} ({detail})")
+        if status == "reachable":
+            successes += 1
+
+    target = TargetContext(
+        group_link=group_link,
+        message_link=message_link,
+        chat_identifier=chat_identifier,
+        message_id=message_id,
+        chat_title=title,
+        message_preview=preview,
+        active_sessions=len(sessions),
+        validation_notes=notes,
+    )
+
+    if successes == 0:
+        notes.insert(0, "❌ Validation failed. No sessions could access the target message.")
+        return None, notes
+    return target, notes
+
+
+async def run_reporting_flow(
+    state: ConversationState, panel_chat: int, client: Client
+) -> None:
+    state.mode = "reporting"
+    state.paused = False
+    report_reason = resolve_reason_class(state.report.report_reason_key)
+    report_text = state.report.report_text or REPORT_TEXT
+    sessions = load_session_strings(state.report.session_limit or 0)
+
+    header = (
+        "🛰️ **Live Reporting Panel**\n"
+        f"Target: {state.target.group_link}\n"
+        f"Message: {state.target.message_link}\n"
+        f"Report reason: {state.report.report_reason_key}\n"
+        f"Report text: {report_text or 'Not set'}\n"
+        f"Requested total: {state.report.report_total or 'Not set'}\n"
+        f"Sessions available: {len(sessions)}"
+    )
+
+    sent_id = await send_log_message(
+        client, panel_chat, header, reply_markup=live_panel_keyboard(state.paused)
+    )
+    state.last_panel_text = header
+    state.live_panel = sent_id
+    state.live_panel_chat = panel_chat
+    success = 0
+    failed = 0
+    details: List[str] = []
+
+    for session_name, session_str in sessions:
+        while state.paused:
+            await asyncio.sleep(1)
+        status, detail = await evaluate_session(
+            session_name,
+            session_str,
+            state.target.group_link or "",
+            state.target.chat_identifier or "",
+            state.target.message_id or 0,
+            reason=report_reason,
+            report_text=report_text,
+        )
+        if status == "reachable":
+            success += 1
+        else:
+            failed += 1
+        details.append(f"• {session_name}: {status} ({detail})")
+        panel_text = (
+            header
+            + "\n"
+            + f"\nSuccessful reports: {success}\nFailed reports: {failed}\nStatus: {'Paused' if state.paused else 'Running'}\n\n"
+            + "\n".join(details)
+        )
+        if state.live_panel and state.live_panel_chat:
+            await edit_log_message(
+                client,
+                state.live_panel_chat,
+                state.live_panel,
+                panel_text,
+                reply_markup=live_panel_keyboard(state.paused),
+            )
+            state.last_panel_text = panel_text
+
+    completion = header + "\n\n✅ Reporting finished."
+    if state.live_panel and state.live_panel_chat:
+        await edit_log_message(
+            client,
+            state.live_panel_chat,
+            state.live_panel,
+            completion,
+            reply_markup=live_panel_keyboard(state.paused),
+        )
+        state.last_panel_text = completion
+
+
+REASON_MAP = {
+    "child_abuse": types.InputReportReasonChildAbuse,
+    "violence": types.InputReportReasonViolence,
+    "illegal_goods": types.InputReportReasonIllegalDrugs,
+    "illegal_adult": types.InputReportReasonPornography,
+    "personal_data": types.InputReportReasonPersonalDetails,
+    "scam": types.InputReportReasonSpam,
+    "copyright": types.InputReportReasonCopyright,
+    "spam": types.InputReportReasonSpam,
+    "other": types.InputReportReasonOther,
+}
+
+
+def resolve_reason_class(key: str) -> types.TypeInputReportReason:
+    normalized = key.strip().lower()
+    cls = REASON_MAP.get(normalized, types.InputReportReasonOther)
+    return cls()
+
+
+def reason_from_config() -> types.TypeInputReportReason:
     configured_reason = os.getenv("REPORT_REASON", CONFIG.get("REPORT_REASON"))
     if configured_reason:
         normalized = str(configured_reason).strip().lower()
-        if normalized in mapping:
-            return mapping[normalized]()
+        if normalized in REASON_MAP:
+            return REASON_MAP[normalized]()
 
     legacy_mapping = {
         "REPORT_REASON_CHILD_ABUSE": types.InputReportReasonChildAbuse,
@@ -178,25 +445,36 @@ REPORT_REASON = reason_from_config()
 REPORT_TEXT = os.getenv("REPORT_TEXT", CONFIG.get("REPORT_TEXT", ""))
 
 
-async def send_log_message(client: Client, chat_id: int, text: str) -> Optional[int]:
+async def send_log_message(
+    client: Client,
+    chat_id: int,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> Optional[int]:
     try:
-        msg = await client.send_message(chat_id, text)
+        msg = await client.send_message(chat_id, text, reply_markup=reply_markup)
         return msg.id
     except InviteHashExpired:
         if LOG_GROUP_ID:
-            msg = await client.send_message(LOG_GROUP_ID, text)
+            msg = await client.send_message(LOG_GROUP_ID, text, reply_markup=reply_markup)
             return msg.id
     except RPCError:
         return None
     return None
 
 
-async def edit_log_message(client: Client, chat_id: int, message_id: int, text: str) -> None:
+async def edit_log_message(
+    client: Client,
+    chat_id: int,
+    message_id: int,
+    text: str,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
     try:
-        await client.edit_message_text(chat_id, message_id, text)
+        await client.edit_message_text(chat_id, message_id, text, reply_markup=reply_markup)
     except InviteHashExpired:
         if LOG_GROUP_ID:
-            await client.edit_message_text(LOG_GROUP_ID, message_id, text)
+            await client.edit_message_text(LOG_GROUP_ID, message_id, text, reply_markup=reply_markup)
     except RPCError:
         pass
 
@@ -236,6 +514,9 @@ async def evaluate_session(
     join_link: str,
     target: Union[str, int],
     message_id: int,
+    *,
+    reason: Optional[types.TypeInputReportReason] = None,
+    report_text: Optional[str] = None,
 ) -> Tuple[str, str]:
     try:
         async with Client(
@@ -262,8 +543,8 @@ async def evaluate_session(
                     functions.messages.Report(
                         peer=peer,
                         id=[msg.id],
-                        reason=REPORT_REASON,
-                        message=REPORT_TEXT,
+                        reason=reason or REPORT_REASON,
+                        message=report_text if report_text is not None else REPORT_TEXT,
                     )
                 )
                 return "reachable", f"Session {me.id} ok ({join_detail})"
@@ -279,6 +560,44 @@ async def evaluate_session(
         return "invalid", f"Session error: {e.MESSAGE or e}"  # type: ignore
     except Exception as e:  # noqa: BLE001
         return "invalid", f"Unexpected: {e}"
+
+
+async def validate_session_access(
+    session_name: str,
+    session_str: str,
+    join_link: str,
+    target: Union[str, int],
+    message_id: int,
+) -> Tuple[str, str, Optional[str], Optional[str]]:
+    """Join and fetch the message without reporting to confirm accessibility."""
+
+    try:
+        async with Client(
+            name=f"validate_{session_name}",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_str,
+            no_updates=True,
+        ) as user_client:
+            peer, join_detail = await join_target_chat(user_client, join_link, target)
+            if not peer:
+                return "invalid", f"Join failed: {join_detail}", None, None
+            try:
+                msg = await user_client.get_messages(target, message_id)
+                preview = (msg.text or msg.caption or "").strip()
+                preview = preview[:120] + ("…" if len(preview) > 120 else "") if preview else None
+                return "reachable", f"{join_detail}", msg.chat.title or msg.chat.first_name, preview
+            except RPCError as e:
+                return "inaccessible", f"Message error: {e.MESSAGE or e}", None, None  # type: ignore
+    except UserAlreadyParticipant:
+        return "reachable", "Already joined", None, None
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        return "floodwait", f"FloodWait {e.value}s", None, None
+    except RPCError as e:
+        return "invalid", f"RPC error: {e.MESSAGE or e}", None, None  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        return "invalid", f"Unexpected: {e}", None, None
 
 
 async def handle_run_command(client: Client, message) -> None:
@@ -472,6 +791,35 @@ async def handle_set_report_text(message) -> None:
     await message.reply_text("✅ Report text updated.")
 
 
+async def start_target_prompt(message, state: ConversationState) -> None:
+    state.mode = "awaiting_group_link"
+    await message.reply_text(
+        "Send the **group or channel link** to target (public @username or invite link).",
+        reply_markup=InlineKeyboardMarkup(
+            [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+        ),
+    )
+
+
+async def confirm_target_and_configure(
+    message, state: ConversationState, validation_notes: List[str]
+) -> None:
+    summary = format_target_summary(state)
+    summary += "\n\n" + "\n".join(validation_notes)
+    await message.reply_text(summary, reply_markup=target_keyboard())
+    if state.report.report_total is None:
+        state.mode = "awaiting_report_total"
+        await message.reply_text(
+            "How many reports should be sent? Reply with a number, then fine-tune the reason via buttons.",
+            reply_markup=configuration_keyboard(state),
+        )
+    else:
+        await message.reply_text(
+            "Choose a report reason, provide the number of reports, or adjust text via the settings.",
+            reply_markup=configuration_keyboard(state),
+        )
+
+
 async def handle_set_total_reports(message) -> None:
     if not owner_required(message):
         await message.reply_text("❌ Only the log group owner can update the total reports.")
@@ -564,6 +912,31 @@ async def main():
         session_string=PRIMARY_SESSION,
     )
 
+    @app.on_message(filters.command("start"))
+    async def _start(_, msg):
+        global OWNER_ID
+        if msg.from_user:
+            state = get_state(msg.from_user.id)
+        else:
+            await msg.reply_text("⚠️ Start is only available in private chats with the owner.")
+            return
+
+        if OWNER_ID is None and msg.from_user:
+            OWNER_ID = msg.from_user.id
+            CONFIG["OWNER_ID"] = OWNER_ID
+            save_config(CONFIG)
+        if not owner_required(msg):
+            await msg.reply_text("❌ Only the configured owner can control this bot.")
+            return
+
+        state.mode = "idle"
+        state.target = TargetContext()
+        state.report.report_text = CONFIG.get("REPORT_TEXT", "")
+        await msg.reply_text(
+            "Welcome to the button-driven reporting system. Choose an action to begin.",
+            reply_markup=start_keyboard(),
+        )
+
     @app.on_message(filters.command("help"))
     async def _help(_, msg):
         await msg.reply_text(format_help())
@@ -595,6 +968,266 @@ async def main():
     @app.on_message(filters.command("add_session"))
     async def _add_session(_, msg):
         await handle_add_session(msg)
+
+    @app.on_callback_query()
+    async def _callbacks(client: Client, cq: CallbackQuery):
+        if OWNER_ID is None:
+            await cq.answer("Set OWNER_ID first via /set_owner.", show_alert=True)
+            return
+        if not cq.from_user or cq.from_user.id != OWNER_ID:
+            await cq.answer("Only the owner can use these controls.", show_alert=True)
+            return
+
+        state = get_state(cq.from_user.id)
+        data = cq.data or ""
+
+        if data == "add_sessions":
+            state.mode = "awaiting_session_name"
+            await cq.message.reply_text(
+                "Send a session name (letters/numbers/underscore). After that, send the session string.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                ),
+            )
+            await cq.answer()
+            return
+
+        if data == "setup_target":
+            await start_target_prompt(cq.message, state)
+            await cq.answer()
+            return
+
+        if data == "configure":
+            text = (
+                "⚙️ **Configuration**\n"
+                f"Report type: {state.report.report_type}\n"
+                f"Reason key: {state.report.report_reason_key}\n"
+                f"Report text: {state.report.report_text or 'Not set'}\n"
+                f"Total reports: {state.report.report_total or 'Not set'}"
+            )
+            await cq.message.reply_text(text, reply_markup=configuration_keyboard(state))
+            await cq.answer()
+            return
+
+        if data == "show_help":
+            await cq.message.reply_text(format_help())
+            await cq.answer()
+            return
+
+        if data == "back_home":
+            state.mode = "idle"
+            await cq.message.reply_text(
+                "Back to home. Choose what to do next.", reply_markup=start_keyboard()
+            )
+            await cq.answer()
+            return
+
+        if data == "choose_type":
+            await cq.message.reply_text(
+                "Select a report reason (applies to new reports immediately).",
+                reply_markup=reason_keyboard(),
+            )
+            await cq.answer()
+            return
+
+        if data.startswith("reason:"):
+            _, key = data.split(":", 1)
+            global REPORT_REASON
+            state.report.report_reason_key = key
+            state.report.report_type = key.replace("_", " ").title()
+            CONFIG["REPORT_REASON"] = key
+            save_config(CONFIG)
+            REPORT_REASON = resolve_reason_class(key)
+            await cq.message.reply_text(
+                f"✅ Reason updated to {key}.", reply_markup=configuration_keyboard(state)
+            )
+            await cq.answer("Reason updated")
+            return
+
+        if data == "change_text":
+            state.mode = "awaiting_report_text"
+            await cq.message.reply_text(
+                "Send the new report text/message body.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                ),
+            )
+            await cq.answer()
+            return
+
+        if data == "change_total":
+            state.mode = "awaiting_report_total"
+            await cq.message.reply_text(
+                "Send the new total number of reports to log (integer).",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                ),
+            )
+            await cq.answer()
+            return
+
+        if data == "begin_report":
+            if not state.target.message_id:
+                await cq.answer("Set a target first.", show_alert=True)
+                return
+            state.report.session_limit = state.report.session_limit or state.target.active_sessions
+            await cq.message.reply_text(
+                "Starting live reporting…", reply_markup=live_panel_keyboard()
+            )
+            asyncio.create_task(
+                run_reporting_flow(
+                    state, cq.message.chat.id if cq.message.chat else LOG_GROUP_ID, client
+                )
+            )
+            await cq.answer()
+            return
+
+        if data == "toggle_pause":
+            state.paused = not state.paused
+            await cq.answer("Paused" if state.paused else "Resumed")
+            if state.live_panel and state.live_panel_chat:
+                text = state.last_panel_text or "🛰️ Live Reporting Panel"
+                status_line = f"\nStatus: {'Paused' if state.paused else 'Running'}"
+                await edit_log_message(
+                    client,
+                    state.live_panel_chat,
+                    state.live_panel,
+                    text + status_line,
+                    reply_markup=live_panel_keyboard(state.paused),
+                )
+
+    @app.on_message(~filters.command(["start", "help", "set_owner", "run", "set_reason", "set_report_text", "set_total_reports", "set_links", "add_session"]))
+    async def _stateful(_, msg):
+        if not msg.from_user:
+            return
+        if OWNER_ID is None:
+            await msg.reply_text("Set OWNER_ID first with /set_owner.")
+            return
+        if msg.from_user.id != OWNER_ID:
+            await msg.reply_text("❌ Only the configured owner can control this bot.")
+            return
+
+        state = get_state(msg.from_user.id)
+
+        if state.mode == "awaiting_session_name":
+            name = msg.text.strip()
+            if not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
+                await msg.reply_text(
+                    "❌ Session name must be 1-64 characters (letters, numbers, underscores, hyphens)."
+                )
+                return
+            state.pending_session_name = name
+            state.mode = "awaiting_session_value"
+            await msg.reply_text(
+                f"Send the session string for `{name}`.",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                ),
+            )
+            return
+
+        if state.mode == "awaiting_session_value":
+            name = state.pending_session_name
+            if not name:
+                state.mode = "idle"
+                await msg.reply_text("Session flow reset. Start again from /start.")
+                return
+            session_str = msg.text.strip()
+            if len(session_str) < 10:
+                await msg.reply_text("❌ Session string looks too short. Please provide a valid session string.")
+                return
+            os.makedirs(SESSIONS_DIR, exist_ok=True)
+            dest = os.path.join(SESSIONS_DIR, f"{name}.session")
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(session_str)
+            state.mode = "idle"
+            state.pending_session_name = None
+            await msg.reply_text(
+                f"✅ Session `{name}` added. Add more or go back home.",
+                reply_markup=start_keyboard(),
+            )
+            return
+
+        if state.mode == "awaiting_group_link":
+            link = msg.text.strip()
+            if not is_valid_group_link(link):
+                await msg.reply_text(
+                    "❌ Invalid group/channel link. Provide a valid https://t.me invite or @username link.",
+                    reply_markup=InlineKeyboardMarkup(
+                        [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                    ),
+                )
+                return
+            state.target.group_link = link
+            state.mode = "awaiting_message_link"
+            await msg.reply_text(
+                "Great. Now send the target **message link** (https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>).",
+                reply_markup=InlineKeyboardMarkup(
+                    [[InlineKeyboardButton("Cancel", callback_data="back_home")]]
+                ),
+            )
+            return
+
+        if state.mode == "awaiting_message_link":
+            message_link = msg.text.strip()
+            chat_identifier, msg_id = parse_link(message_link)
+            if chat_identifier is None or msg_id is None:
+                await msg.reply_text(
+                    "❌ Invalid message link. Use https://t.me/<username>/<id> or https://t.me/c/<internal_id>/<id>."
+                )
+                return
+            state.target.message_link = message_link
+            state.target.chat_identifier = chat_identifier
+            state.target.message_id = msg_id
+            state.report.session_limit = 0
+            await msg.reply_text("Validating target across sessions…")
+            target, notes = await validate_target_with_sessions(
+                state.target.group_link or "", message_link, state.report.session_limit
+            )
+            if not target:
+                await msg.reply_text("\n".join(notes))
+                state.mode = "idle"
+                return
+            state.target = target
+            state.mode = "confirmed"
+            await confirm_target_and_configure(msg, state, notes)
+            return
+
+    if state.mode == "awaiting_report_text":
+        global REPORT_TEXT
+        text = msg.text.strip()
+        state.report.report_text = text
+        CONFIG["REPORT_TEXT"] = text
+        REPORT_TEXT = text
+        save_config(CONFIG)
+        state.mode = "idle"
+        await msg.reply_text(
+            "✅ Report text updated.", reply_markup=configuration_keyboard(state)
+        )
+        return
+
+    if state.mode == "awaiting_report_total":
+        try:
+            total = int(msg.text.strip())
+            if total < 0:
+                raise ValueError
+        except ValueError:
+            await msg.reply_text("❌ Please send a non-negative integer.")
+            return
+        state.report.report_total = total
+        CONFIG["TOTAL_REPORTS"] = total
+        save_config(CONFIG)
+        state.mode = "idle"
+        await msg.reply_text(
+            f"✅ Total reports updated to {total}.",
+            reply_markup=configuration_keyboard(state),
+        )
+        return
+
+    await msg.reply_text(
+        "Use the buttons from /start to navigate the guided flow.",
+        reply_markup=start_keyboard(),
+    )
 
     await app.start()
     print("Moderator tool is running...")
