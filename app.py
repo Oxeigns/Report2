@@ -232,7 +232,8 @@ CONFIG = load_config()
 STATE_DATA = load_state()
 API_ID = parse_int(os.getenv("API_ID") or CONFIG.get("API_ID"))
 API_HASH = os.getenv("API_HASH") or CONFIG.get("API_HASH", "")
-OWNER_ID = CONFIG.get("OWNER_ID")
+owner_id_value = os.getenv("OWNER_ID") if os.getenv("OWNER_ID") is not None else CONFIG.get("OWNER_ID")
+OWNER_ID = parse_int(owner_id_value) or None
 LOG_GROUP_LINK = CONFIG.get("LOG_GROUP_LINK", "")
 PRIMARY_SESSION = CONFIG.get("PRIMARY_SESSION") or os.getenv("PRIMARY_SESSION", "")
 
@@ -245,7 +246,9 @@ if not PRIMARY_SESSION:
     raise RuntimeError("PRIMARY_SESSION must be configured for the bootstrap account")
 
 if OWNER_ID is None:
-    raise RuntimeError("OWNER_ID must be configured and cannot be changed after deployment")
+    raise RuntimeError(
+        "OWNER_ID must be configured via environment variable or config.json and cannot be changed after deployment"
+    )
 
 # ----------------------
 # Utilities
