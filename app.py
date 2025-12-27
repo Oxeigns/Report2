@@ -969,6 +969,10 @@ async def main():
                 pass
             return True
 
+        # The owner should always be able to control the bot, regardless of chat context.
+        if is_owner(user_id):
+            return False
+
         if is_log_group_message(msg):
             return False
 
