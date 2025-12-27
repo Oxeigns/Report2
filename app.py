@@ -625,26 +625,39 @@ async def join_target_chat(
     join_link: str,
     chat_identifier: Union[str, int],
 ) -> Tuple[Optional[object], str]:
-    normalized = normalize_group_link(join_link)
+    normalized = normalize_group_link(join_link) if join_link else ""
+    last_detail = ""
+
+    if join_link and is_valid_group_link(join_link):
+        try:
+            chat = await client.join_chat(normalized)
+            return await client.resolve_peer(chat.id), "✅ Joined group/channel"
+        except FloodWait as e:
+            await asyncio.sleep(e.value)
+            return None, f"⏳ FloodWait {e.value}s while joining"
+        except UserAlreadyParticipant:
+            last_detail = "ℹ️ Already a participant"
+        except (InviteHashExpired, InviteHashInvalid):
+            return None, "❌ Invite link expired or invalid"
+        except (UsernameInvalid, UsernameNotOccupied):
+            last_detail = "❌ Invalid or unknown public group/channel link"
+        except RPCError as e:
+            last_detail = f"❌ Failed to join: {getattr(e, 'MESSAGE', None) or e}"
+    elif join_link:
+        last_detail = "⚠️ Join link did not look valid; using message link target instead"
+    else:
+        last_detail = "ℹ️ No join link provided; using message link target"
 
     try:
-        chat = await client.join_chat(normalized)
-        return await client.resolve_peer(chat.id), "✅ Joined group/channel"
+        peer = await client.resolve_peer(chat_identifier)
+        return peer, last_detail or "ℹ️ Resolved target via message link"
     except FloodWait as e:
         await asyncio.sleep(e.value)
-        return None, f"⏳ FloodWait {e.value}s while joining"
-    except UserAlreadyParticipant:
-        try:
-            peer = await client.resolve_peer(chat_identifier)
-            return peer, "ℹ️ Already a participant"
-        except RPCError as e:
-            return None, f"⚠️ Could not confirm membership: {getattr(e, 'MESSAGE', None) or e}"
-    except (InviteHashExpired, InviteHashInvalid):
-        return None, "❌ Invite link expired or invalid"
+        return None, f"⏳ FloodWait {e.value}s while resolving target"
     except (UsernameInvalid, UsernameNotOccupied):
-        return None, "❌ Invalid or unknown public group/channel link"
+        return None, last_detail or "❌ Invalid or unknown public group/channel link"
     except RPCError as e:
-        return None, f"❌ Failed to join: {getattr(e, 'MESSAGE', None) or e}"
+        return None, last_detail or f"❌ Failed to resolve target: {getattr(e, 'MESSAGE', None) or e}"
 
 
 async def evaluate_session(
