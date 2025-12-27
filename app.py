@@ -947,13 +947,22 @@ async def main():
         return filters.command(name) & command_scope
 
     def unauthorized(msg) -> bool:
-        if not is_log_group_message(msg):
-            return True
-
         user_id = resolve_effective_user_id(msg)
         if not has_power(user_id):
             return True
-        return False
+
+        # Allow commands from the configured log group as well as direct chats
+        # with the owner/sudo users. Previously, only log-group messages were
+        # processed, which made the client appear unresponsive when using
+        # private control flows.
+        if is_log_group_message(msg):
+            return False
+
+        chat = getattr(msg, "chat", None)
+        if chat and getattr(chat, "type", None) == "private":
+            return True if chat.id is None else False
+
+        return True
 
     if debug_updates:
         @app.on_message(filters.all, group=-1)
