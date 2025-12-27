@@ -69,6 +69,9 @@ FloodWaits are handled automatically with pauses, and if the log group invite li
 
 ## Running locally
 
+[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy?template=https://github.com/Oxeigns/Report2/tree/main)
+
+
 ```bash
 pip install -r requirements.txt
 python app.py
