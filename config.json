@@ -1,9 +1,6 @@
 {
   "API_ID": "your_api_id",
   "API_HASH": "your_api_hash",
-  "CHANNEL_LINK": "https://t.me/your_channel",
-  "MESSAGE_LINK": "https://t.me/your_channel/123",
-  "NUMBER_OF_REPORTS": 500,
   "REPORT_TEXT": "Illegal content detected",
   "REPORT_REASON_CHILD_ABUSE": true,
   "REPORT_REASON_VIOLENCE": false,

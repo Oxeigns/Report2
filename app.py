@@ -3,7 +3,7 @@ import json
 import os
 import re
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Union
 
 from pyrogram import Client, filters
 from pyrogram.errors import FloodWait, InviteHashExpired, RPCError
@@ -27,8 +27,10 @@ def load_config() -> Dict:
 
 
 def save_config(config: Dict) -> None:
-    with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+    tmp_path = f"{CONFIG_PATH}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
+    os.replace(tmp_path, CONFIG_PATH)
 
 
 def load_session_strings(max_count: int) -> List[Tuple[str, str]]:
@@ -94,7 +96,7 @@ def format_help() -> str:
     )
 
 
-def parse_link(link: str) -> Tuple[Optional[str], Optional[int]]:
+def parse_link(link: str) -> Tuple[Optional[Union[str, int]], Optional[int]]:
     link = link.strip()
     pattern_username = r"^https://t\.me/([A-Za-z0-9_]+)/([0-9]+)$"
     pattern_c = r"^https://t\.me/c/([0-9]+)/([0-9]+)$"
@@ -110,7 +112,7 @@ def parse_link(link: str) -> Tuple[Optional[str], Optional[int]]:
         internal_id = m_c.group(1)
         msg_id = int(m_c.group(2))
         chat_id = int(f"-100{internal_id}")
-        return str(chat_id), msg_id
+        return chat_id, msg_id
 
     return None, None
 
@@ -239,6 +241,8 @@ async def handle_run_command(client: Client, message) -> None:
         await message.reply_text("No session strings found to run validation")
         return
 
+    available_sessions = len(sessions)
+
     panel_text = (
         "🛰️ **Review Panel Initialized**\n"
         f"Target: {target_link}\n"
@@ -246,6 +250,7 @@ async def handle_run_command(client: Client, message) -> None:
         f"Message ID: {msg_id}\n"
         f"Requested sessions: {sessions_count}\n"
         f"Requested count: {requested_count}\n"
+        f"Available sessions: {available_sessions}\n"
         "Processing..."
     )
     panel_chat = message.chat.id if message.chat else LOG_GROUP_ID
@@ -269,7 +274,8 @@ async def handle_run_command(client: Client, message) -> None:
             f"Message ID: {msg_id}\n"
             f"Requested sessions: {sessions_count}\n"
             f"Requested count: {requested_count}\n"
-            f"Sessions validated: {processed}/{sessions_count}\n"
+            f"Available sessions: {available_sessions}\n"
+            f"Sessions validated: {processed}/{min(sessions_count, available_sessions)}\n"
             f"Reachable sessions: {reachable}/{processed}\n\n"
             "\n".join(results)
         )
