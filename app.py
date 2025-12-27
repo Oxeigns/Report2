@@ -630,6 +630,15 @@ def is_sudo(user_id: Optional[int]) -> bool:
     return user_id is not None and user_id in STATE_DATA.get("sudo_user_ids", [])
 
 
+def resolve_effective_user_id(message) -> Optional[int]:
+    if getattr(message, "from_user", None):
+        return message.from_user.id
+    if getattr(message, "sender_chat", None) and message.chat and STATE_DATA.get("log_group_id"):
+        if message.sender_chat.id == STATE_DATA.get("log_group_id"):
+            return OWNER_ID
+    return None
+
+
 def has_power(user_id: Optional[int]) -> bool:
     return is_owner(user_id) or is_sudo(user_id)
 
@@ -794,7 +803,8 @@ async def main():
     )
 
     def unauthorized(msg) -> bool:
-        if not msg.from_user or not has_power(msg.from_user.id):
+        user_id = resolve_effective_user_id(msg)
+        if not has_power(user_id):
             asyncio.create_task(safe_reply_text(msg, "Unauthorized."))
             return True
         return False
