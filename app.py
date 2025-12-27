@@ -19,14 +19,12 @@ from pyrogram.raw import functions, types
 from pyrogram.raw.base import InputReportReason
 from pyrogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 
-# File paths
+# ----------------------
+# Configuration & State Management
+# ----------------------
 CONFIG_PATH = "config.json"
 STATE_PATH = "state.json"
 SESSIONS_DIR = "sessions"
-
-# ----------------------
-# [span_2](start_span)Data Models[span_2](end_span)
-# ----------------------
 
 @dataclass
 class TargetContext:
@@ -61,13 +59,8 @@ class ConversationState:
 
 USER_STATES: Dict[int, ConversationState] = {}
 
-# ----------------------
-# [span_3](start_span)Configuration & State[span_3](end_span)
-# ----------------------
-
 def load_config() -> Dict:
     if not os.path.exists(CONFIG_PATH):
-        # Default config if file missing
         return {"API_ID": None, "API_HASH": "", "PRIMARY_SESSION": "", "LOG_GROUP_LINK": "", "OWNER_ID": None}
     with open(CONFIG_PATH, "r", encoding="utf-8") as f:
         return json.load(f)
@@ -79,7 +72,7 @@ def parse_int(value: Optional[Union[str, int]]) -> int:
         return 0
 
 CONFIG = load_config()
-# [span_4](start_span)[span_5](start_span)Priority: Environment Variables (app.json) > config.json[span_4](end_span)[span_5](end_span)
+# Priority: Environment Variables (app.json) > config.json
 API_ID = parse_int(os.getenv("API_ID") or CONFIG.get("API_ID"))
 API_HASH = os.getenv("API_HASH") or CONFIG.get("API_HASH", "")
 OWNER_ID = parse_int(os.getenv("OWNER_ID") or CONFIG.get("OWNER_ID"))
@@ -99,9 +92,8 @@ def save_state(state: Dict) -> None:
         json.dump(state, f, indent=2)
 
 # ----------------------
-# [span_6](start_span)Logic & Helper Functions[span_6](end_span)
+# Logic & Helper Functions
 # ----------------------
-
 REASON_MAP = {
     "child_abuse": types.InputReportReasonChildAbuse,
     "violence": types.InputReportReasonViolence,
@@ -160,9 +152,8 @@ async def run_reporting_flow(state: ConversationState, chat_id: int, client: Cli
     await client.send_message(chat_id, "✅ **Reporting Finished.**")
 
 # ----------------------
-# [span_7](start_span)Bot Event Handlers[span_7](end_span)
+# Bot Event Handlers
 # ----------------------
-
 async def main():
     if not API_ID or not PRIMARY_SESSION:
         print("CRITICAL: API_ID and PRIMARY_SESSION must be set in environment or config.json")
@@ -239,3 +230,4 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
