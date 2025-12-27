@@ -216,6 +216,26 @@ def load_session_strings(max_count: int, include_primary: bool = True) -> List[T
     return sessions
 
 
+async def validate_session_string(session_str: str) -> Tuple[bool, str]:
+    try:
+        async with Client(
+            name="validate_new_session",
+            api_id=API_ID,
+            api_hash=API_HASH,
+            session_string=session_str,
+            no_updates=True,
+        ) as user_client:
+            me = await user_client.get_me()
+            return True, f"Valid session for @{getattr(me, 'username', None) or me.id}"
+    except FloodWait as e:
+        await asyncio.sleep(e.value)
+        return False, f"FloodWait {e.value}s while validating session"
+    except RPCError as e:
+        return False, f"Session rejected: {getattr(e, 'MESSAGE', None) or e}"
+    except Exception as e:  # noqa: BLE001
+        return False, f"Unexpected validation error: {e}"
+
+
 def get_state(user_id: int) -> ConversationState:
     if user_id not in USER_STATES:
         USER_STATES[user_id] = ConversationState()
@@ -262,13 +282,13 @@ def format_help() -> str:
         "/start - show help and current status\n"
         "/help - show command list\n"
         "/set_target <group_link> - set target group/channel link, then send the message link when prompted\n"
-        "/send_link <group_link> - quick flow asking for message link and number of reports\n"
+        "/send_link <group_link> - quick flow asking for message link; report count defaults to available sessions\n"
         "/session_limit <n> - limit number of sessions used (0 = all)\n"
-        "/add_session <name> <session_string> - store a user session string\n"
+        "/add_session [name] - prompt to send and store a user session string\n"
         "/set_reason <key> - choose report type (keys: "
         + ", ".join(REASON_MAP.keys())
         + ")\n"
-        "/set_total_reports <n> - set number of reports to send\n"
+        "/set_total_reports <n> - optionally override the number of reports to send\n"
         "/pause /resume - control reporting loop\n"
         "/status - show current state summary\n"
         "/start_report - begin reporting with the current configuration\n"
@@ -892,7 +912,10 @@ async def handle_set_reason(message, state: ConversationState) -> None:
         await safe_reply_text(message, "Invalid reason key. Choose from: " + ", ".join(REASON_MAP.keys()))
         return
     state.report.report_reason_key = value
-    await safe_reply_text(message, f"Report reason set to {value}. Now set number of reports with /set_total_reports.")
+    await safe_reply_text(
+        message,
+        f"Report reason set to {value}. We'll use all available sessions unless you override with /set_total_reports.",
+    )
 
 
 async def handle_set_report_text(message, state: ConversationState) -> None:
@@ -920,24 +943,19 @@ async def handle_set_total_reports(message, state: ConversationState) -> None:
     await safe_reply_text(message, f"Total reports set to {total}. Use /start_report to begin.")
 
 
-async def handle_add_session(message) -> None:
-    parts = (message.text or "").split(maxsplit=2)
-    if len(parts) != 3:
-        await safe_reply_text(message, "Usage: /add_session <name> <session_string>")
-        return
-    name = parts[1].strip()
-    session_str = parts[2].strip()
+async def handle_add_session(message, state: ConversationState) -> None:
+    parts = (message.text or "").split(maxsplit=1)
+    name = parts[1].strip() if len(parts) == 2 else ""
+    if not name:
+        existing = os.listdir(SESSIONS_DIR) if os.path.isdir(SESSIONS_DIR) else []
+        count = len([f for f in existing if f.endswith(".session")])
+        name = f"session_{count + 1}"
     if not re.match(r"^[A-Za-z0-9_\-]{1,64}$", name):
         await safe_reply_text(message, "Session name must be 1-64 characters (letters, numbers, underscores, hyphens).")
         return
-    if len(session_str) < 10:
-        await safe_reply_text(message, "Session string looks too short.")
-        return
-    os.makedirs(SESSIONS_DIR, exist_ok=True)
-    dest = os.path.join(SESSIONS_DIR, f"{name}.session")
-    with open(dest, "w", encoding="utf-8") as f:
-        f.write(session_str)
-    await safe_reply_text(message, f"Session `{name}` added. Run /status to review.")
+    state.pending_session_name = name
+    state.mode = "awaiting_session_string"
+    await safe_reply_text(message, f"Send the session string for `{name}` in your next message.")
 
 
 async def handle_set_links(message, state: ConversationState, group_link: str, message_link: str) -> None:
@@ -961,7 +979,7 @@ async def handle_set_links(message, state: ConversationState, group_link: str, m
         summary
         + "\n\nChoose report type with /set_reason <key>. Available: "
         + ", ".join(REASON_MAP.keys())
-        + "\nThen set total reports with /set_total_reports <n> and start with /start_report.",
+        + "\nUse all sessions by default or override with /set_total_reports <n>, then start with /start_report.",
     )
     state.mode = "awaiting_report_type"
 
@@ -1104,7 +1122,8 @@ async def main():
     async def _add_session_handler(_, msg):
         if unauthorized(msg):
             return
-        await handle_add_session(msg)
+        state = get_state(msg.from_user.id)
+        await handle_add_session(msg, state)
 
     @app.on_message(command_filter("set_reason"))
     async def _set_reason(_, msg):
@@ -1169,8 +1188,11 @@ async def main():
             await safe_reply_text(msg, "Set a target first with /set_target or /send_link.")
             return
         if state.report.report_total is None:
-            await safe_reply_text(msg, "Set report count with /set_total_reports before starting.")
-            return
+            session_count = len(load_session_strings(state.report.session_limit or 0))
+            if session_count == 0:
+                await safe_reply_text(msg, "No sessions available. Add sessions with /add_session first.")
+                return
+            state.report.report_total = session_count
         await safe_reply_text(msg, REPORTING_ENABLED_TEXT)
         await safe_reply_text(msg, "Reporting started. Progress will appear here or in the log group.")
         await run_reporting_flow(state, msg.chat.id if msg.chat else None, client)
@@ -1189,11 +1211,30 @@ async def main():
                 return
             await handle_set_links(msg, state, state.target.group_link or "", message_link)
             if state.quick_start:
-                state.mode = "awaiting_report_total"
+                state.mode = "awaiting_report_type"
                 await safe_reply_text(
                     msg,
-                    "Send the number of reports to file (positive integer).",
+                    "Send the report type key (" + ", ".join(REASON_MAP.keys()) + "). Report count defaults to your available sessions.",
                 )
+            return
+
+        if state.mode == "awaiting_session_string":
+            session_name = state.pending_session_name or "session"
+            session_str = (msg.text or "").strip()
+            if len(session_str) < 10:
+                await safe_reply_text(msg, "Session string looks too short. Send a valid session string or /cancel.")
+                return
+            ok, detail = await validate_session_string(session_str)
+            if not ok:
+                await safe_reply_text(msg, f"Session validation failed: {detail}. Send another session or /cancel.")
+                return
+            os.makedirs(SESSIONS_DIR, exist_ok=True)
+            dest = os.path.join(SESSIONS_DIR, f"{session_name}.session")
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(session_str)
+            state.mode = "idle"
+            state.pending_session_name = None
+            await safe_reply_text(msg, f"Session `{session_name}` saved. {detail}")
             return
 
         if state.mode == "awaiting_report_type":
@@ -1204,11 +1245,11 @@ async def main():
                     state.mode = "awaiting_report_text"
                     await safe_reply_text(msg, "Send a reason/description for the report or type 'skip' to leave it blank.")
                 else:
+                    state.mode = "idle"
                     await safe_reply_text(
                         msg,
-                        "Reason set. Provide number of reports with /set_total_reports or send a number now.",
+                        "Reason set. We'll use all available sessions unless you /set_total_reports. Use /start_report to begin.",
                     )
-                    state.mode = "awaiting_report_total"
             else:
                 await safe_reply_text(msg, "Unknown reason. Choose from: " + ", ".join(REASON_MAP.keys()))
             return
