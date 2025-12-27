@@ -1,16 +1,15 @@
 {
   "API_ID": "your_api_id",
   "API_HASH": "your_api_hash",
-  "REPORT_TEXT": "Illegal content detected",
-  "REPORT_REASON_CHILD_ABUSE": true,
-  "REPORT_REASON_VIOLENCE": false,
-  "REPORT_REASON_ILLEGAL_GOODS": false,
-  "REPORT_REASON_ILLEGAL_ADULT": false,
-  "REPORT_REASON_PERSONAL_DATA": false,
-  "REPORT_REASON_SCAM": false,
-  "REPORT_REASON_COPYRIGHT": false,
-  "REPORT_REASON_SPAM": false,
-  "REPORT_REASON_OTHER": false,
+  "REPORT_TEXT": "",
+  "REPORT_REASON": "other",
+  "REPORT_TYPE": "standard",
+  "TOTAL_REPORTS": null,
+  "REPORT_SESSION_LIMIT": 0,
   "OWNER_ID": null,
-  "LOG_GROUP_ID": 0
+  "LOG_GROUP_ID": 0,
+  "LOG_GROUP_LINK": "",
+  "GROUP_MESSAGE_LINK": "",
+  "TARGET_GROUP_LINK": "",
+  "TARGET_MESSAGE_LINK": ""
 }
